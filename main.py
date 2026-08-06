@@ -304,23 +304,70 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
-# ============ معالج الأزرار ============
+# ============ معالج الأزرار (مُصلح) ============
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    # نستخدم query.message مباشرة لأنه يحتوي على reply_text
     if query.data == "status":
-        await cmd_status(update, context)
+        msg = f"""
+📊 <b>حالة البوت</b>
+
+الحالة: {'⏸️ متوقف' if db['paused'] else '✅ يعمل'}
+الجلسة: {get_session_name()}
+الصفقة: {'صفقة ' + db['active_trade']['direction'] + ' نشطة' if db['active_trade'] else 'لا توجد صفقة'}
+إشارات اليوم: {len(db['signals'])}
+        """
+        await query.message.reply_text(msg, parse_mode="HTML")
+        
     elif query.data == "price":
-        await cmd_price(update, context)
+        try:
+            price = await fetch_price()
+            msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD"
+            await query.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطأ: {e}")
+            
     elif query.data == "signal":
-        await cmd_signal(update, context)
+        if not db["signals"]:
+            await query.message.reply_text("⏳ لا توجد إشارات بعد")
+        else:
+            last = db["signals"][-1]
+            msg = f"""
+📈 <b>آخر إشارة</b>
+
+القرار: {last['decision']}
+الثقة: {last['confidence']}%
+السعر: {last['price']}
+الوقت: {last['time']}
+            """
+            await query.message.reply_text(msg, parse_mode="HTML")
+            
     elif query.data == "stats":
-        await cmd_stats(update, context)
+        stats = db["stats"]
+        total = stats["wins"] + stats["losses"]
+        win_rate = (stats["wins"] / total * 100) if total > 0 else 0
+        msg = f"""
+📉 <b>إحصائيات الأداء</b>
+
+إجمالي الصفقات: {total}
+✅ رابحة: {stats['wins']}
+❌ خاسرة: {stats['losses']}
+نسبة الربح: {win_rate:.1f}%
+إجمالي النقاط: {stats['total_pips']:+.1f}
+        """
+        await query.message.reply_text(msg, parse_mode="HTML")
+        
     elif query.data == "pause":
-        await cmd_pause(update, context)
+        db["paused"] = True
+        await query.message.reply_text("⏸️ <b>تم إيقاف البوت مؤقتاً</b>", parse_mode="HTML")
+        await send_msg("⏸️ البوت متوقف مؤقتاً من المستخدم")
+        
     elif query.data == "resume":
-        await cmd_resume(update, context)
+        db["paused"] = False
+        await query.message.reply_text("▶️ <b>تم استئناف البوت</b>", parse_mode="HTML")
+        await send_msg("▶️ البوت يعمل الآن")
 
 
 # ============ التقرير اليومي ============
@@ -528,3 +575,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
