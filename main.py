@@ -5,6 +5,7 @@ Gold Scalp AI Monitor v4 - Railway Edition (Full Features)
 - إحصائيات وقاعدة بيانات في الذاكرة
 - تقرير يومي
 - تحكم كامل من الجوال
+- جلسات لندن، نيويورك، طوكيو، سيدني
 """
 
 import os
@@ -36,8 +37,11 @@ TIMEFRAMES = {
     "M1": ("1min", 60),
 }
 
-LONDON_SESSION = (7, 16)
-NEW_YORK_SESSION = (12, 21)
+# ============ الجلسات ============
+LONDON_SESSION = (7, 16)      # 07:00 - 16:00 UTC
+NEW_YORK_SESSION = (12, 21)   # 12:00 - 21:00 UTC
+TOKYO_SESSION = (0, 9)        # 00:00 - 09:00 UTC
+SYDNEY_SESSION = (22, 7)      # 22:00 - 07:00 UTC (يومين)
 
 # ============ قاعدة البيانات في الذاكرة ============
 db = {
@@ -106,7 +110,7 @@ GOLD_SCALP_PROMPT = """
     "recommended_risk_percent": "نسبة المخاطرة الموصى بها",
     "expected_duration": "20-30 mins"
   }},
-  "kill_zone_status": "London" | "NY" | "Outside Window",
+  "kill_zone_status": "London" | "NY" | "Tokyo" | "Sydney" | "Outside Window",
   "agents_votes": ["قائمة تفصيلية بصوت كل وكيل من الـ 12 مع سبب مختصر يستند لبيانات فعلية"],
   "executive_summary": "ملخص تنفيذي بالعربية"
 }}
@@ -121,7 +125,11 @@ def now_str():
 def is_valid_session():
     now = datetime.now(timezone.utc)
     hour = now.hour + now.minute / 60
-    return (LONDON_SESSION[0] <= hour < LONDON_SESSION[1]) or (NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1])
+    in_london = LONDON_SESSION[0] <= hour < LONDON_SESSION[1]
+    in_ny = NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1]
+    in_tokyo = TOKYO_SESSION[0] <= hour < TOKYO_SESSION[1]
+    in_sydney = hour >= SYDNEY_SESSION[0] or hour < SYDNEY_SESSION[1]
+    return in_london or in_ny or in_tokyo or in_sydney
 
 
 def get_session_name():
@@ -131,6 +139,10 @@ def get_session_name():
         return "لندن 🇬🇧"
     elif NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1]:
         return "نيويورك 🇺🇸"
+    elif TOKYO_SESSION[0] <= hour < TOKYO_SESSION[1]:
+        return "طوكيو 🇯🇵"
+    elif hour >= SYDNEY_SESSION[0] or hour < SYDNEY_SESSION[1]:
+        return "سيدني 🇦🇺"
     return "خارج الجلسات ⏸️"
 
 
@@ -303,7 +315,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - المساعدة
 
 💡 <b>نصائح:</b>
-• البوت يعمل فقط في جلسات لندن ونيويورك
+• البوت يعمل في جلسات لندن، نيويورك، طوكيو، وسيدني
 • الثقة المطلوبة: 75%+
 • أنت تنفذ الصفقات يدوياً على XM
     """
@@ -588,4 +600,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
