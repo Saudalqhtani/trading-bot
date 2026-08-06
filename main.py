@@ -1,28 +1,31 @@
 """
-Gold Scalp AI Monitor v4 - Railway Edition
+Gold Scalp AI Monitor v4 - Railway Edition (Full Features)
 ========================================================================
-- asyncio بدل threading
-- بدون STATE_FILE (Railway filesystem مؤقت)
-- جدولة بـ asyncio
+- أوامر Telegram تفاعلية
+- إحصائيات وقاعدة بيانات في الذاكرة
+- تقرير يومي
+- تحكم كامل من الجوال
 """
 
 import os
 import json
 import asyncio
 import aiohttp
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ============ الإعدادات من متغيرات البيئة ============
+# ============ الإعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
-MONITOR_INTERVAL_SECONDS = 15
-ANALYSIS_INTERVAL_SECONDS = 180
-MIN_CONFIDENCE_TO_ALERT = 75
-GEMINI_MODEL = "gemini-1.5-flash"  # الموديل المتاح حالياً
+MONITOR_INTERVAL = 15
+ANALYSIS_INTERVAL = 180
+MIN_CONFIDENCE = 75
+GEMINI_MODEL = "gemini-1.5-flash"
 PIP_VALUE = 1.0
 
 TIMEFRAMES = {
@@ -35,13 +38,18 @@ TIMEFRAMES = {
 LONDON_SESSION = (7, 16)
 NEW_YORK_SESSION = (12, 21)
 
-# حالة البوت في الذاكرة (Railway filesystem مؤقت)
-state = {
+# ============ قاعدة البيانات في الذاكرة ============
+db = {
+    "trades": [],
+    "signals": [],
+    "stats": {"wins": 0, "losses": 0, "total_pips": 0},
+    "paused": False,
     "active_trade": None,
     "last_analysis_ts": 0,
 }
-state_lock = asyncio.Lock()
+db_lock = asyncio.Lock()
 
+# ============ البرومبت ============
 GOLD_SCALP_PROMPT = """
 أنت رئيس المحللين الفنيين ومدير المخاطر في صندوق استثماري عالمي (Elite Financial Analyst). مهمتك هي قيادة "شبكة من 12 وكيلاً ذكياً ومخصصاً" لتحليل بيانات الشموع الفعلية المرفقة لأربع فريمات زمنية (M30, M15, M5, M1)، وإصدار قرار تداول حاسم وخالي تماماً من العموميات بناءً على مفهوم الإجماع (Consensus System).
 
@@ -104,73 +112,217 @@ GOLD_SCALP_PROMPT = """
 """
 
 
+# ============ دوال مساعدة ============
 def now_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def is_valid_trading_session():
+def is_valid_session():
     now = datetime.now(timezone.utc)
     hour = now.hour + now.minute / 60
-    in_london = LONDON_SESSION[0] <= hour < LONDON_SESSION[1]
-    in_ny = NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1]
-    return in_london or in_ny
+    return (LONDON_SESSION[0] <= hour < LONDON_SESSION[1]) or (NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1])
 
 
-async def send_telegram_message(session: aiohttp.ClientSession, text: str):
+def get_session_name():
+    now = datetime.now(timezone.utc)
+    hour = now.hour + now.minute / 60
+    if LONDON_SESSION[0] <= hour < LONDON_SESSION[1]:
+        return "لندن 🇬🇧"
+    elif NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1]:
+        return "نيويورك 🇺🇸"
+    return "خارج الجلسات ⏸️"
+
+
+# ============ API دوال ============
+async def send_msg(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-        resp.raise_for_status()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            resp.raise_for_status()
 
 
-async def fetch_current_price(session: aiohttp.ClientSession):
+async def fetch_price():
     url = "https://api.twelvedata.com/quote"
     params = {"symbol": SYMBOL, "apikey": TWELVE_DATA_API_KEY}
-    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-        data = await resp.json()
-        if "close" not in data:
-            raise RuntimeError(f"خطأ Twelve Data (quote): {data}")
-        return float(data["close"])
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
+            return float(data["close"])
 
 
-async def fetch_timeframe(session: aiohttp.ClientSession, interval: str, outputsize: int):
+async def fetch_tf(interval: str, size: int):
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": SYMBOL, "interval": interval, "outputsize": outputsize, "apikey": TWELVE_DATA_API_KEY}
-    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-        data = await resp.json()
-        if "values" not in data:
-            raise RuntimeError(f"خطأ Twelve Data ({interval}): {data}")
-        return data["values"]
+    params = {"symbol": SYMBOL, "interval": interval, "outputsize": size, "apikey": TWELVE_DATA_API_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            data = await resp.json()
+            return data["values"]
 
 
-async def fetch_all_timeframes(session: aiohttp.ClientSession):
+async def fetch_all_tf():
     result = {}
     for label, (interval, size) in TIMEFRAMES.items():
-        result[label] = await fetch_timeframe(session, interval, size)
-        await asyncio.sleep(1)  # تجنب rate limit
+        result[label] = await fetch_tf(interval, size)
+        await asyncio.sleep(1)
     return result
 
 
-async def analyze_with_gemini(session: aiohttp.ClientSession, tf_data: dict):
-    prompt_text = GOLD_SCALP_PROMPT.format(
+async def analyze_gemini(tf_data: dict):
+    prompt = GOLD_SCALP_PROMPT.format(
         data_m30=json.dumps(tf_data["M30"]),
         data_m15=json.dumps(tf_data["M15"]),
         data_m5=json.dumps(tf_data["M5"]),
         data_m1=json.dumps(tf_data["M1"]),
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"maxOutputTokens": 6000}
-    }
-    async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-        result = await resp.json()
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-        clean = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(clean)
+    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 6000}}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+            result = await resp.json()
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            clean = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            return json.loads(clean)
 
 
-async def open_new_trade(session: aiohttp.ClientSession, analysis: dict, current_price: float):
+# ============ أوامر Telegram ============
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📊 الحالة", callback_data="status"),
+         InlineKeyboardButton("💵 السعر", callback_data="price")],
+        [InlineKeyboardButton("📈 الإشارة", callback_data="signal"),
+         InlineKeyboardButton("📉 الإحصائيات", callback_data="stats")],
+        [InlineKeyboardButton("⏸️ إيقاف مؤقت", callback_data="pause"),
+         InlineKeyboardButton("▶️ استئناف", callback_data="resume")],
+    ]
+    reply = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "🤖 <b>بوت الذهب الذكي</b>\n\nاختر أحد الخيارات:",
+        parse_mode="HTML",
+        reply_markup=reply
+    )
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        paused = db["paused"]
+        active = db["active_trade"]
+        signals_count = len(db["signals"])
+    
+    status = "⏸️ متوقف" if paused else "✅ يعمل"
+    trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
+    
+    msg = f"""
+📊 <b>حالة البوت</b>
+
+الحالة: {status}
+الجلسة: {get_session_name()}
+الصفقة: {trade_status}
+إشارات اليوم: {signals_count}
+    """
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = await fetch_price()
+        msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD"
+        await update.message.reply_text(msg, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
+
+async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        if not db["signals"]:
+            await update.message.reply_text("⏳ لا توجد إشارات بعد")
+            return
+        last = db["signals"][-1]
+    
+    msg = f"""
+📈 <b>آخر إشارة</b>
+
+القرار: {last['decision']}
+الثقة: {last['confidence']}%
+السعر: {last['price']}
+الوقت: {last['time']}
+    """
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        stats = db["stats"]
+        total = stats["wins"] + stats["losses"]
+        win_rate = (stats["wins"] / total * 100) if total > 0 else 0
+    
+    msg = f"""
+📉 <b>إحصائيات الأداء</b>
+
+إجمالي الصفقات: {total}
+✅ رابحة: {stats['wins']}
+❌ خاسرة: {stats['losses']}
+نسبة الربح: {win_rate:.1f}%
+إجمالي النقاط: {stats['total_pips']:+.1f}
+    """
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        db["paused"] = True
+    await update.message.reply_text("⏸️ <b>تم إيقاف البوت مؤقتاً</b>", parse_mode="HTML")
+    await send_msg("⏸️ البوت متوقف مؤقتاً من المستخدم")
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        db["paused"] = False
+    await update.message.reply_text("▶️ <b>تم استئناف البوت</b>", parse_mode="HTML")
+    await send_msg("▶️ البوت يعمل الآن")
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = """
+🤖 <b>الأوامر المتاحة</b>
+
+/start - القائمة الرئيسية
+/status - حالة البوت
+/price - سعر الذهب الحالي
+/signal - آخر إشارة
+/stats - إحصائيات الأداء
+/pause - إيقاف مؤقت
+/resume - استئناف
+/help - المساعدة
+
+💡 <b>نصائح:</b>
+• البوت يعمل فقط في جلسات لندن ونيويورك
+• الثقة المطلوبة: 75%+
+• أنت تنفذ الصفقات يدوياً على XM
+    """
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+# ============ التقرير اليومي ============
+async def daily_report():
+    async with db_lock:
+        stats = db["stats"]
+        signals_today = [s for s in db["signals"] if s["time"].startswith(datetime.now(timezone.utc).strftime("%Y-%m-%d"))]
+    
+    msg = f"""
+📅 <b>التقرير اليومي</b>
+
+إشارات اليوم: {len(signals_today)}
+الصفقات المغلقة: {stats['wins'] + stats['losses']}
+إجمالي النقاط: {stats['total_pips']:+.1f}
+
+🕐 {now_str()}
+    """
+    await send_msg(msg)
+
+
+# ============ التحليل والمراقبة ============
+async def open_trade(analysis: dict, price: float):
     direction = analysis["final_decision"]
     setup = analysis["trade_setup"]
     entry = float(setup["entry_zone"])
@@ -190,132 +342,168 @@ async def open_new_trade(session: aiohttp.ClientSession, analysis: dict, current
         "summary": analysis.get("executive_summary", "-"),
     }
 
+    async with db_lock:
+        db["active_trade"] = trade
+        db["signals"].append({
+            "decision": direction,
+            "confidence": analysis["confidence_score"],
+            "price": entry,
+            "time": now_str(),
+        })
+
     emoji = "🟢" if direction == "BUY" else "🔴"
     msg = (
-        f"{emoji} <b>إشارة جديدة {direction} - ذهب</b>\n\n"
+        f"{emoji} <b>إشارة جديدة {direction}</b>\n\n"
         f"الدخول: {entry}\n"
         f"الثقة: {trade['confidence']}%\n"
         f"SL: {trade['sl_price']:.2f}\n"
         f"TP1: {trade['tp1_price']:.2f} | TP2: {trade['tp2_price']:.2f}\n"
-        f"الحالة: {analysis.get('kill_zone_status', '-')}\n\n"
+        f"R:R: {setup.get('risk_reward_ratio', '-')}\n"
+        f"المخاطرة: {setup.get('recommended_risk_percent', '-')}\n\n"
         f"<b>الملخص:</b>\n{trade['summary']}\n\n"
         f"🕐 {trade['opened_at']}"
     )
-    await send_telegram_message(session, msg)
-    print(f"  🆕 صفقة جديدة: {direction} @ {entry}")
+    await send_msg(msg)
     return trade
 
 
-async def check_trade_hit(trade: dict, current_price: float):
+async def check_trade(trade: dict, price: float):
     direction = trade["direction"]
     sign = 1 if direction == "BUY" else -1
-    if (current_price - trade["sl_price"]) * sign <= 0:
-        return True, "sl"
-    if (current_price - trade["tp2_price"]) * sign >= 0:
-        return True, "tp2"
-    if (current_price - trade["tp1_price"]) * sign >= 0:
-        return True, "tp1"
-    return False, None
+    
+    if (price - trade["sl_price"]) * sign <= 0:
+        return "sl"
+    if (price - trade["tp2_price"]) * sign >= 0:
+        return "tp2"
+    if (price - trade["tp1_price"]) * sign >= 0:
+        return "tp1"
+    return None
 
 
-async def notify_trade_closed(session: aiohttp.ClientSession, trade: dict, current_price: float, reason: str):
+async def close_trade(trade: dict, price: float, reason: str):
     direction = trade["direction"]
+    entry = trade["entry"]
+    pips = abs(price - entry) / PIP_VALUE
+    
+    async with db_lock:
+        db["active_trade"] = None
+        if reason == "sl":
+            db["stats"]["losses"] += 1
+            db["stats"]["total_pips"] -= pips
+        else:
+            db["stats"]["wins"] += 1
+            db["stats"]["total_pips"] += pips
+
     if reason == "sl":
-        msg = (
-            f"❌ <b>تم ضرب وقف الخسارة - {direction}</b>\n\n"
-            f"السعر الحالي: {current_price}\nالدخول: {trade['entry']}\n\n"
-            f"جاري البحث عن فرصة جديدة...\n🕐 {now_str()}"
-        )
+        msg = f"❌ <b>وقف خسارة - {direction}</b>\nالسعر: {price}\nالخسارة: {pips:.1f} نقطة\n🕐 {now_str()}"
     elif reason == "tp2":
-        msg = (
-            f"🎯 <b>تحقق الهدف الثاني (TP2) - {direction}</b>\n\n"
-            f"السعر الحالي: {current_price}\nالدخول: {trade['entry']}\n\n"
-            f"الصفقة اكتملت ✅ جاري البحث عن فرصة جديدة...\n🕐 {now_str()}"
-        )
-    else:  # tp1
-        msg = (
-            f"✅ <b>تحقق الهدف الأول (TP1) - {direction}</b>\n\n"
-            f"السعر الحالي: {current_price}\nالدخول: {trade['entry']}\n\n"
-            f"جاري إعادة تحليل السوق فورًا...\n🕐 {now_str()}"
-        )
-    await send_telegram_message(session, msg)
+        msg = f"🎯 <b>TP2 محقق - {direction}</b>\nالسعر: {price}\nالربح: {pips:.1f} نقطة\n🕐 {now_str()}"
+    else:
+        msg = f"✅ <b>TP1 محقق - {direction}</b>\nالسعر: {price}\nالربح: {pips:.1f} نقطة\n🕐 {now_str()}"
+    
+    await send_msg(msg)
 
 
-async def price_monitor_loop(session: aiohttp.ClientSession):
-    """مراقبة السعر - تفحص كل 15 ثانية"""
+# ============ الحلقات الرئيسية ============
+async def monitor_loop():
     while True:
         try:
-            async with state_lock:
-                trade = state.get("active_trade")
+            async with db_lock:
+                if db["paused"]:
+                    await asyncio.sleep(MONITOR_INTERVAL)
+                    continue
+                trade = db["active_trade"]
 
-            if trade is not None:
-                current_price = await fetch_current_price(session)
-                print(f"[مراقبة {now_str()}] {trade['direction']} | السعر: {current_price}")
+            if trade:
+                price = await fetch_price()
+                result = await check_trade(trade, price)
+                if result:
+                    await close_trade(trade, price, result)
+                    async with db_lock:
+                        db["last_analysis_ts"] = 0
 
-                should_close, reason = await check_trade_hit(trade, current_price)
-                if should_close:
-                    await notify_trade_closed(session, trade, current_price, reason)
-                    async with state_lock:
-                        state["active_trade"] = None
-                        state["last_analysis_ts"] = 0
-                    print(f"  🔒 أُغلقت ({reason})")
-
-            await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
-
+            await asyncio.sleep(MONITOR_INTERVAL)
         except Exception as e:
-            print(f"  ❌ خطأ بمراقبة السعر: {e}")
-            await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
+            print(f"❌ خطأ مراقبة: {e}")
+            await asyncio.sleep(MONITOR_INTERVAL)
 
 
-async def analysis_loop(session: aiohttp.ClientSession):
-    """تحليل Gemini - كل 3 دقائق"""
+async def analysis_loop():
     while True:
         try:
-            async with state_lock:
-                has_trade = state.get("active_trade") is not None
-                elapsed = time.time() - state.get("last_analysis_ts", 0)
+            async with db_lock:
+                if db["paused"]:
+                    await asyncio.sleep(5)
+                    continue
+                has_trade = db["active_trade"] is not None
+                elapsed = time.time() - db["last_analysis_ts"]
 
-            if not has_trade and elapsed >= ANALYSIS_INTERVAL_SECONDS:
-                if not is_valid_trading_session():
-                    print(f"[تحليل {now_str()}] خارج الجلسات - تخطي")
-                    async with state_lock:
-                        state["last_analysis_ts"] = time.time()
+            if not has_trade and elapsed >= ANALYSIS_INTERVAL:
+                if not is_valid_session():
+                    print(f"[تحليل] خارج الجلسات - تخطي")
+                    async with db_lock:
+                        db["last_analysis_ts"] = time.time()
                 else:
-                    print(f"[تحليل {now_str()}] جاري التحليل...")
-                    tf_data = await fetch_all_timeframes(session)
-                    current_price = await fetch_current_price(session)
-                    analysis = await analyze_with_gemini(session, tf_data)
+                    print(f"[تحليل] جاري التحليل...")
+                    tf_data = await fetch_all_tf()
+                    price = await fetch_price()
+                    analysis = await analyze_gemini(tf_data)
                     decision = analysis["final_decision"]
                     confidence = float(analysis["confidence_score"])
                     print(f"  القرار: {decision} | الثقة: {confidence}%")
 
-                    async with state_lock:
-                        state["last_analysis_ts"] = time.time()
-                        if decision in ("BUY", "SELL") and confidence >= MIN_CONFIDENCE_TO_ALERT:
-                            state["active_trade"] = await open_new_trade(session, analysis, current_price)
+                    async with db_lock:
+                        db["last_analysis_ts"] = time.time()
+                        if decision in ("BUY", "SELL") and confidence >= MIN_CONFIDENCE:
+                            await open_trade(analysis, price)
                         else:
                             print("  ⏸️ HOLD أو ثقة منخفضة")
 
             await asyncio.sleep(5)
-
         except Exception as e:
-            print(f"  ❌ خطأ بالتحليل: {e}")
+            print(f"❌ خطأ تحليل: {e}")
             await asyncio.sleep(5)
 
 
+async def report_loop():
+    while True:
+        now = datetime.now(timezone.utc)
+        next_report = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
+        wait = (next_report - now).total_seconds()
+        await asyncio.sleep(wait)
+        await daily_report()
+
+
+# ============ نقطة الدخول ============
 async def main():
-    print("🚀 بدء تشغيل نظام مراقبة الذهب v4 (Railway Edition)...")
+    # إعداد Telegram bot
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("price", cmd_price))
+    application.add_handler(CommandHandler("signal", cmd_signal))
+    application.add_handler(CommandHandler("stats", cmd_stats))
+    application.add_handler(CommandHandler("pause", cmd_pause))
+    application.add_handler(CommandHandler("resume", cmd_resume))
+    application.add_handler(CommandHandler("help", cmd_help))
+
+    # بدء البوت
+    await application.initialize()
+    await application.start()
     
     # إشعار بدء التشغيل
-    async with aiohttp.ClientSession() as session:
-        await send_telegram_message(session, "🚀 <b>بوت الذهب يعمل الآن!</b>\nجاري مراقبة السوق...")
-        
-        # تشغيل المهمتين معاً
-        await asyncio.gather(
-            price_monitor_loop(session),
-            analysis_loop(session)
-        )
+    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة")
+
+    # تشغيل المهام
+    await asyncio.gather(
+        monitor_loop(),
+        analysis_loop(),
+        report_loop(),
+        application.updater.start_polling(),
+    )
 
 
 if __name__ == "__main__":
+    import time
     asyncio.run(main())
