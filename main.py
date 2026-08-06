@@ -149,7 +149,13 @@ async def fetch_price():
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
-            return float(data["close"])
+            print(f"DEBUG Twelve Data response: {json.dumps(data, indent=2)}")
+            if "close" in data:
+                return float(data["close"])
+            elif "price" in data:
+                return float(data["price"])
+            else:
+                raise RuntimeError(f"Unexpected response: {json.dumps(data)}")
 
 
 async def fetch_tf(interval: str, size: int):
@@ -304,20 +310,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
-# ============ معالج الأزرار (مُصلح) ============
+# ============ معالج الأزرار ============
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # نستخدم query.message مباشرة لأنه يحتوي على reply_text
     if query.data == "status":
+        async with db_lock:
+            paused = db["paused"]
+            active = db["active_trade"]
+            signals_count = len(db["signals"])
+        status = "⏸️ متوقف" if paused else "✅ يعمل"
+        trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
         msg = f"""
 📊 <b>حالة البوت</b>
 
-الحالة: {'⏸️ متوقف' if db['paused'] else '✅ يعمل'}
+الحالة: {status}
 الجلسة: {get_session_name()}
-الصفقة: {'صفقة ' + db['active_trade']['direction'] + ' نشطة' if db['active_trade'] else 'لا توجد صفقة'}
-إشارات اليوم: {len(db['signals'])}
+الصفقة: {trade_status}
+إشارات اليوم: {signals_count}
         """
         await query.message.reply_text(msg, parse_mode="HTML")
         
@@ -360,12 +371,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(msg, parse_mode="HTML")
         
     elif query.data == "pause":
-        db["paused"] = True
+        async with db_lock:
+            db["paused"] = True
         await query.message.reply_text("⏸️ <b>تم إيقاف البوت مؤقتاً</b>", parse_mode="HTML")
         await send_msg("⏸️ البوت متوقف مؤقتاً من المستخدم")
         
     elif query.data == "resume":
-        db["paused"] = False
+        async with db_lock:
+            db["paused"] = False
         await query.message.reply_text("▶️ <b>تم استئناف البوت</b>", parse_mode="HTML")
         await send_msg("▶️ البوت يعمل الآن")
 
