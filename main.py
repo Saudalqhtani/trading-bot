@@ -14,7 +14,7 @@ import aiohttp
 import time
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
 # ============ الإعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -304,6 +304,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
+# ============ معالج الأزرار ============
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "status":
+        await cmd_status(update, context)
+    elif query.data == "price":
+        await cmd_price(update, context)
+    elif query.data == "signal":
+        await cmd_signal(update, context)
+    elif query.data == "stats":
+        await cmd_stats(update, context)
+    elif query.data == "pause":
+        await cmd_pause(update, context)
+    elif query.data == "resume":
+        await cmd_resume(update, context)
+
+
 # ============ التقرير اليومي ============
 async def daily_report():
     async with db_lock:
@@ -489,6 +508,7 @@ async def main():
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CallbackQueryHandler(button_handler))
 
     # بدء البوت
     await application.initialize()
