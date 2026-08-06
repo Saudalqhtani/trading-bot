@@ -747,12 +747,11 @@ async def main():
     # إشعار بدء التشغيل
     await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
 
-    # تشغيل المهام
+    # تشغيل المهام بدون polling (نستخدم webhook بدلاً)
     await asyncio.gather(
         monitor_loop(),
         analysis_loop(),
         report_loop(),
-        application.updater.start_polling(),
     )
 
 
