@@ -11,6 +11,7 @@ import os
 import json
 import asyncio
 import aiohttp
+import time
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -192,7 +193,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("💵 السعر", callback_data="price")],
         [InlineKeyboardButton("📈 الإشارة", callback_data="signal"),
          InlineKeyboardButton("📉 الإحصائيات", callback_data="stats")],
-        [InlineKeyboardButton("⏸️ إيقاف مؤقت", callback_data="pause"),
+        [InlineKeyboardButton("⏸️ إيقاف", callback_data="pause"),
          InlineKeyboardButton("▶️ استئناف", callback_data="resume")],
     ]
     reply = InlineKeyboardMarkup(keyboard)
@@ -307,7 +308,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily_report():
     async with db_lock:
         stats = db["stats"]
-        signals_today = [s for s in db["signals"] if s["time"].startswith(datetime.now(timezone.utc).strftime("%Y-%m-%d"))]
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        signals_today = [s for s in db["signals"] if s["time"].startswith(today)]
     
     msg = f"""
 📅 <b>التقرير اليومي</b>
@@ -505,5 +507,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import time
     asyncio.run(main())
