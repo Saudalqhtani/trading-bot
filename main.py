@@ -7,6 +7,7 @@ Gold Scalp AI Monitor v4 - Railway Edition (Full Features)
 - تحكم كامل من الجوال
 - جلسات لندن، نيويورك، طوكيو، سيدني
 - تخصيص نسبة المخاطرة
+- إشعار قبل الأخبار العاجلة
 """
 
 import os
@@ -14,6 +15,7 @@ import json
 import asyncio
 import aiohttp
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -53,6 +55,7 @@ db = {
     "active_trade": None,
     "last_analysis_ts": 0,
     "risk_percent": 1.0,  # نسبة المخاطرة الافتراضية 1%
+    "news_blocked_until": 0,  # توقيت فك حظر الأخبار
 }
 db_lock = asyncio.Lock()
 
@@ -206,6 +209,79 @@ async def analyze_gemini(tf_data: dict):
             return json.loads(clean)
 
 
+# ============ أخبار الفوركس ============
+async def fetch_forex_news():
+    """جلب الأخبار الاقتصادية من Forex Factory"""
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            xml_data = await resp.text()
+            root = ET.fromstring(xml_data)
+            
+            news_list = []
+            now = datetime.now(timezone.utc)
+            
+            for event in root.findall('event'):
+                currency = event.find('country').text
+                impact = event.find('impact').text
+                time_str = event.find('date').text + ' ' + event.find('time').text
+                event_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                
+                # نهتم فقط بأخبار USD (لأن الذهب مقابل الدولار)
+                if currency == 'USD' and impact == 'High':
+                    minutes_until = (event_time - now).total_seconds() / 60
+                    news_list.append({
+                        'title': event.find('title').text,
+                        'time': event_time,
+                        'minutes_until': minutes_until
+                    })
+            
+            return news_list
+
+
+async def check_news_and_block():
+    """فحص الأخبار وإيقاف التحليل إذا لزم"""
+    try:
+        news_list = await fetch_forex_news()
+        now = time.time()
+        
+        for news in news_list:
+            # إذا الخبر خلال 20 دقيقة أو حالياً
+            if -30 <= news['minutes_until'] <= 20:
+                block_until = now + (news['minutes_until'] + 30) * 60  # نوقف 30 دقيقة بعد الخبر
+                
+                async with db_lock:
+                    db["news_blocked_until"] = block_until
+                
+                msg = f"""
+⚠️ <b>تنبيه: خبر اقتصادي هام!</b>
+
+الخبر: {news['title']}
+التأثير: عالي 🔴
+الوقت: {news['time'].strftime('%H:%M')} UTC
+
+⏸️ تم إيقاف التحليل مؤقتاً حتى {news['time'].strftime('%H:%M')} UTC + 30 دقيقة
+
+🕐 {now_str()}
+                """
+                await send_msg(msg)
+                print(f"  🛑 تحليل موقف بسبب خبر: {news['title']}")
+                return True
+        
+        # إذا ما فيه أخبار، نتأكد إن الحظر مرفوع
+        async with db_lock:
+            if db["news_blocked_until"] > 0 and now > db["news_blocked_until"]:
+                db["news_blocked_until"] = 0
+                await send_msg("✅ <b>انتهى تأثير الخبر</b>\n\nجاري استئناف التحليل...")
+                print("  ✅ حظر الأخبار مرفوع")
+        
+        return False
+        
+    except Exception as e:
+        print(f"  ⚠️ خطأ بجلب الأخبار: {e}")
+        return False
+
+
 # ============ أوامر Telegram ============
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -230,9 +306,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active = db["active_trade"]
         signals_count = len(db["signals"])
         risk = db["risk_percent"]
+        blocked = time.time() < db["news_blocked_until"]
     
     status = "⏸️ متوقف" if paused else "✅ يعمل"
     trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
+    news_status = "🔴 موقف بسبب خبر" if blocked else "🟢 لا توجد أخبار"
     
     msg = f"""
 📊 <b>حالة البوت</b>
@@ -242,6 +320,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 الصفقة: {trade_status}
 إشارات اليوم: {signals_count}
 نسبة المخاطرة: {risk}%
+الأخبار: {news_status}
 
 💡 استخدم /risk لتغيير النسبة
     """
@@ -363,6 +442,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • البوت يعمل في جلسات لندن، نيويورك، طوكيو، وسيدني
 • الثقة المطلوبة: 75%+
 • أنت تنفذ الصفقات يدوياً على XM
+• البوت يتوقف تلقائياً قبل الأخبار العاجلة
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -378,8 +458,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active = db["active_trade"]
             signals_count = len(db["signals"])
             risk = db["risk_percent"]
+            blocked = time.time() < db["news_blocked_until"]
         status = "⏸️ متوقف" if paused else "✅ يعمل"
         trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
+        news_status = "🔴 موقف بسبب خبر" if blocked else "🟢 لا توجد أخبار"
         msg = f"""
 📊 <b>حالة البوت</b>
 
@@ -388,6 +470,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 الصفقة: {trade_status}
 إشارات اليوم: {signals_count}
 نسبة المخاطرة: {risk}%
+الأخبار: {news_status}
 
 💡 استخدم /risk لتغيير النسبة
         """
@@ -591,6 +674,21 @@ async def analysis_loop():
                 elapsed = time.time() - db["last_analysis_ts"]
 
             if not has_trade and elapsed >= ANALYSIS_INTERVAL:
+                # فحص الأخبار أولاً
+                news_blocked = await check_news_and_block()
+                if news_blocked:
+                    await asyncio.sleep(60)
+                    continue
+                
+                # التحقق من حظر الأخبار
+                async with db_lock:
+                    blocked = time.time() < db["news_blocked_until"]
+                
+                if blocked:
+                    print(f"[تحليل] موقف بسبب خبر - تخطي")
+                    await asyncio.sleep(60)
+                    continue
+                
                 if not is_valid_session():
                     print(f"[تحليل] خارج الجلسات - تخطي")
                     async with db_lock:
@@ -647,7 +745,7 @@ async def main():
     await application.start()
     
     # إشعار بدء التشغيل
-    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة")
+    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
 
     # تشغيل المهام
     await asyncio.gather(
@@ -660,3 +758,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
