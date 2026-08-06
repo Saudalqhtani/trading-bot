@@ -6,6 +6,7 @@ Gold Scalp AI Monitor v4 - Railway Edition (Full Features)
 - تقرير يومي
 - تحكم كامل من الجوال
 - جلسات لندن، نيويورك، طوكيو، سيدني
+- تخصيص نسبة المخاطرة
 """
 
 import os
@@ -51,6 +52,7 @@ db = {
     "paused": False,
     "active_trade": None,
     "last_analysis_ts": 0,
+    "risk_percent": 1.0,  # نسبة المخاطرة الافتراضية 1%
 }
 db_lock = asyncio.Lock()
 
@@ -227,6 +229,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         paused = db["paused"]
         active = db["active_trade"]
         signals_count = len(db["signals"])
+        risk = db["risk_percent"]
     
     status = "⏸️ متوقف" if paused else "✅ يعمل"
     trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
@@ -238,6 +241,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 الجلسة: {get_session_name()}
 الصفقة: {trade_status}
 إشارات اليوم: {signals_count}
+نسبة المخاطرة: {risk}%
+
+💡 استخدم /risk لتغيير النسبة
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -274,6 +280,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = db["stats"]
         total = stats["wins"] + stats["losses"]
         win_rate = (stats["wins"] / total * 100) if total > 0 else 0
+        risk = db["risk_percent"]
     
     msg = f"""
 📉 <b>إحصائيات الأداء</b>
@@ -283,8 +290,45 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ❌ خاسرة: {stats['losses']}
 نسبة الربح: {win_rate:.1f}%
 إجمالي النقاط: {stats['total_pips']:+.1f}
+نسبة المخاطرة: {risk}%
+
+💡 استخدم /risk لتغيير النسبة
     """
     await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        current_risk = db["risk_percent"]
+    
+    # إذا المستخدم أرسل قيمة جديدة
+    if context.args:
+        try:
+            new_risk = float(context.args[0])
+            if 0.1 <= new_risk <= 5.0:
+                async with db_lock:
+                    db["risk_percent"] = new_risk
+                await update.message.reply_text(
+                    f"✅ <b>تم تعديل نسبة المخاطرة</b>\n\nالنسبة الجديدة: <code>{new_risk}%</code>",
+                    parse_mode="HTML"
+                )
+                await send_msg(f"📊 نسبة المخاطرة تغيرت إلى {new_risk}%")
+            else:
+                await update.message.reply_text(
+                    "❌ <b>خطأ</b>\n\nنسبة المخاطرة يجب أن تكون بين 0.1% و 5.0%",
+                    parse_mode="HTML"
+                )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ <b>خطأ</b>\n\nاستخدم: /risk 1.5\n(رقم بين 0.1 و 5.0)",
+                parse_mode="HTML"
+            )
+    else:
+        # عرض النسبة الحالية
+        await update.message.reply_text(
+            f"📊 <b>نسبة المخاطرة الحالية</b>\n\n<code>{current_risk}%</code>\n\nلتغييرها:\n/risk 1.5",
+            parse_mode="HTML"
+        )
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,6 +354,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /price - سعر الذهب الحالي
 /signal - آخر إشارة
 /stats - إحصائيات الأداء
+/risk - عرض/تعديل نسبة المخاطرة
 /pause - إيقاف مؤقت
 /resume - استئناف
 /help - المساعدة
@@ -332,6 +377,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             paused = db["paused"]
             active = db["active_trade"]
             signals_count = len(db["signals"])
+            risk = db["risk_percent"]
         status = "⏸️ متوقف" if paused else "✅ يعمل"
         trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
         msg = f"""
@@ -341,6 +387,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 الجلسة: {get_session_name()}
 الصفقة: {trade_status}
 إشارات اليوم: {signals_count}
+نسبة المخاطرة: {risk}%
+
+💡 استخدم /risk لتغيير النسبة
         """
         await query.message.reply_text(msg, parse_mode="HTML")
         
@@ -371,6 +420,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = db["stats"]
         total = stats["wins"] + stats["losses"]
         win_rate = (stats["wins"] / total * 100) if total > 0 else 0
+        risk = db["risk_percent"]
         msg = f"""
 📉 <b>إحصائيات الأداء</b>
 
@@ -379,6 +429,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ❌ خاسرة: {stats['losses']}
 نسبة الربح: {win_rate:.1f}%
 إجمالي النقاط: {stats['total_pips']:+.1f}
+نسبة المخاطرة: {risk}%
+
+💡 استخدم /risk لتغيير النسبة
         """
         await query.message.reply_text(msg, parse_mode="HTML")
         
@@ -401,6 +454,7 @@ async def daily_report():
         stats = db["stats"]
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         signals_today = [s for s in db["signals"] if s["time"].startswith(today)]
+        risk = db["risk_percent"]
     
     msg = f"""
 📅 <b>التقرير اليومي</b>
@@ -408,6 +462,7 @@ async def daily_report():
 إشارات اليوم: {len(signals_today)}
 الصفقات المغلقة: {stats['wins'] + stats['losses']}
 إجمالي النقاط: {stats['total_pips']:+.1f}
+نسبة المخاطرة: {risk}%
 
 🕐 {now_str()}
     """
@@ -423,6 +478,9 @@ async def open_trade(analysis: dict, price: float):
     tp1_pips = float(setup["take_profit_1_pips"])
     tp2_pips = float(setup["take_profit_2_pips"])
 
+    async with db_lock:
+        risk = db["risk_percent"]
+
     sign = 1 if direction == "BUY" else -1
     trade = {
         "direction": direction,
@@ -433,6 +491,7 @@ async def open_trade(analysis: dict, price: float):
         "opened_at": now_str(),
         "confidence": analysis["confidence_score"],
         "summary": analysis.get("executive_summary", "-"),
+        "risk_percent": risk,
     }
 
     async with db_lock:
@@ -452,7 +511,7 @@ async def open_trade(analysis: dict, price: float):
         f"SL: {trade['sl_price']:.2f}\n"
         f"TP1: {trade['tp1_price']:.2f} | TP2: {trade['tp2_price']:.2f}\n"
         f"R:R: {setup.get('risk_reward_ratio', '-')}\n"
-        f"المخاطرة: {setup.get('recommended_risk_percent', '-')}\n\n"
+        f"المخاطرة: {risk}%\n\n"
         f"<b>الملخص:</b>\n{trade['summary']}\n\n"
         f"🕐 {trade['opened_at']}"
     )
@@ -577,6 +636,7 @@ async def main():
     application.add_handler(CommandHandler("price", cmd_price))
     application.add_handler(CommandHandler("signal", cmd_signal))
     application.add_handler(CommandHandler("stats", cmd_stats))
+    application.add_handler(CommandHandler("risk", cmd_risk))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("help", cmd_help))
@@ -587,7 +647,7 @@ async def main():
     await application.start()
     
     # إشعار بدء التشغيل
-    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة")
+    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة")
 
     # تشغيل المهام
     await asyncio.gather(
