@@ -25,7 +25,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 # ============ الإعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY") # استبدلناه بمفتاح Twelve Data
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
@@ -58,7 +58,7 @@ db = {
     "last_analysis_ts": 0,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
-    "last_price": 2650.00,
+    "last_price": 0.0,
 }
 db_lock = asyncio.Lock()
 
@@ -154,9 +154,23 @@ async def send_msg(text: str):
 
 
 async def fetch_price():
-    """جلب السعر من الذاكرة لضمان سرعة الاستجابة وعدم استهلاك الطلبات"""
-    async with db_lock:
-        return db["last_price"]
+    """جلب السعر اللحظي الحقيقي مباشرة من endpoint الأسعار في Twelve Data"""
+    url = "https://api.twelvedata.com/price"
+    params = {
+        "symbol": SYMBOL,
+        "apikey": TWELVE_DATA_API_KEY
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
+            if "price" in data:
+                price = float(data["price"])
+                async with db_lock:
+                    db["last_price"] = price
+                return price
+            else:
+                async with db_lock:
+                    return db["last_price"]
 
 
 async def fetch_tf(interval: str):
@@ -166,17 +180,10 @@ async def fetch_tf(interval: str):
         "symbol": SYMBOL,
         "interval": interval,
         "outputsize": 60,
-        apikey: TWELVE_DATA_API_KEY
+        "apikey": TWELVE_DATA_API_KEY
     }
     async with aiohttp.ClientSession() as session:
-        # التصحيح لتمرير المفتاح بالشكل الصحيح في Twelve Data
-        params_td = {
-            "symbol": SYMBOL,
-            "interval": interval,
-            "outputsize": 60,
-            "apikey": TWELVE_DATA_API_KEY
-        }
-        async with session.get(url, params=params_td, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             data = await resp.json()
             if "code" in data and data["code"] != 200:
                 print(f"⚠️ تحذير Twelve Data للفريم {interval}: {data.get('message')}")
@@ -185,7 +192,6 @@ async def fetch_tf(interval: str):
             if "values" in data:
                 candles = data["values"]
                 if candles:
-                    # تحديث السعر الحالي من أحدث شمعة
                     price = float(candles[0]["close"])
                     async with db_lock:
                         db["last_price"] = price
@@ -198,7 +204,7 @@ async def fetch_all_tf():
     for label, interval in TIMEFRAMES.items():
         try:
             result[label] = await fetch_tf(interval)
-            await asyncio.sleep(1)  # توقف قصير بين الطلبات
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
             result[label] = {}
