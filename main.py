@@ -1,7 +1,7 @@
 """
-Gold Scalp AI Monitor v4 - Railway Edition (Full Features)
+Gold Scalp AI Monitor v5 - Railway Edition (Fixed & Enhanced)
 ========================================================================
-- أوامر Telegram تفاعلية
+- أوامر Telegram تفاعلية ✅
 - إحصائيات وقاعدة بيانات في الذاكرة
 - تقرير يومي
 - تحكم كامل من الجوال
@@ -54,8 +54,8 @@ db = {
     "paused": False,
     "active_trade": None,
     "last_analysis_ts": 0,
-    "risk_percent": 1.0,  # نسبة المخاطرة الافتراضية 1%
-    "news_blocked_until": 0,  # توقيت فك حظر الأخبار
+    "risk_percent": 1.0,
+    "news_blocked_until": 0,
 }
 db_lock = asyncio.Lock()
 
@@ -227,7 +227,6 @@ async def fetch_forex_news():
                 time_str = event.find('date').text + ' ' + event.find('time').text
                 event_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 
-                # نهتم فقط بأخبار USD (لأن الذهب مقابل الدولار)
                 if currency == 'USD' and impact == 'High':
                     minutes_until = (event_time - now).total_seconds() / 60
                     news_list.append({
@@ -246,9 +245,8 @@ async def check_news_and_block():
         now = time.time()
         
         for news in news_list:
-            # إذا الخبر خلال 20 دقيقة أو حالياً
             if -30 <= news['minutes_until'] <= 20:
-                block_until = now + (news['minutes_until'] + 30) * 60  # نوقف 30 دقيقة بعد الخبر
+                block_until = now + (news['minutes_until'] + 30) * 60
                 
                 async with db_lock:
                     db["news_blocked_until"] = block_until
@@ -268,7 +266,6 @@ async def check_news_and_block():
                 print(f"  🛑 تحليل موقف بسبب خبر: {news['title']}")
                 return True
         
-        # إذا ما فيه أخبار، نتأكد إن الحظر مرفوع
         async with db_lock:
             if db["news_blocked_until"] > 0 and now > db["news_blocked_until"]:
                 db["news_blocked_until"] = 0
@@ -380,7 +377,6 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         current_risk = db["risk_percent"]
     
-    # إذا المستخدم أرسل قيمة جديدة
     if context.args:
         try:
             new_risk = float(context.args[0])
@@ -403,7 +399,6 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
     else:
-        # عرض النسبة الحالية
         await update.message.reply_text(
             f"📊 <b>نسبة المخاطرة الحالية</b>\n\n<code>{current_risk}%</code>\n\nلتغييرها:\n/risk 1.5",
             parse_mode="HTML"
@@ -485,25 +480,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ خطأ: {e}")
             
     elif query.data == "signal":
-        if not db["signals"]:
-            await query.message.reply_text("⏳ لا توجد إشارات بعد")
-        else:
+        async with db_lock:
+            if not db["signals"]:
+                await query.message.reply_text("⏳ لا توجد إشارات بعد")
+                return
             last = db["signals"][-1]
-            msg = f"""
+        
+        msg = f"""
 📈 <b>آخر إشارة</b>
 
 القرار: {last['decision']}
 الثقة: {last['confidence']}%
 السعر: {last['price']}
 الوقت: {last['time']}
-            """
-            await query.message.reply_text(msg, parse_mode="HTML")
+        """
+        await query.message.reply_text(msg, parse_mode="HTML")
             
     elif query.data == "stats":
-        stats = db["stats"]
-        total = stats["wins"] + stats["losses"]
-        win_rate = (stats["wins"] / total * 100) if total > 0 else 0
-        risk = db["risk_percent"]
+        async with db_lock:
+            stats = db["stats"]
+            total = stats["wins"] + stats["losses"]
+            win_rate = (stats["wins"] / total * 100) if total > 0 else 0
+            risk = db["risk_percent"]
+        
         msg = f"""
 📉 <b>إحصائيات الأداء</b>
 
@@ -674,13 +673,11 @@ async def analysis_loop():
                 elapsed = time.time() - db["last_analysis_ts"]
 
             if not has_trade and elapsed >= ANALYSIS_INTERVAL:
-                # فحص الأخبار أولاً
                 news_blocked = await check_news_and_block()
                 if news_blocked:
                     await asyncio.sleep(60)
                     continue
                 
-                # التحقق من حظر الأخبار
                 async with db_lock:
                     blocked = time.time() < db["news_blocked_until"]
                 
@@ -726,7 +723,6 @@ async def report_loop():
 
 # ============ نقطة الدخول ============
 async def main():
-    # إعداد Telegram bot
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", cmd_start))
@@ -740,16 +736,15 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # بدء البوت بدون polling (نستخدم send_msg فقط للإشعارات)
-    # الأوامر تعمل عبر webhook لاحقاً
-    print("🚀 البوت يعمل في وضع الإشعارات فقط")
-
-
+    # ✅ الإصلاح الرئيسي: تفعيل Polling
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
     
-    # إشعار بدء التشغيل
+    print("🚀 البوت يعمل مع Polling - جاهز لاستقبال الأوامر!")
+
     await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
 
-    # تشغيل المهام فقط (بدون Telegram polling)
     await asyncio.gather(
         monitor_loop(),
         analysis_loop(),
@@ -757,7 +752,5 @@ async def main():
     )
 
 
-
 if __name__ == "__main__":
     asyncio.run(main())
- 
