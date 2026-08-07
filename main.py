@@ -1,6 +1,6 @@
 
 """
-Gold Scalp AI Monitor v6 - Railway Edition (Twelve Data Primary)
+Gold Scalp AI Monitor v5.3 - Railway Edition (Twelve Data Primary)
 ========================================================================
 - أوامر Telegram تفاعلية
 - مصدر رئيسي: Twelve Data (API Key جديد)
@@ -10,12 +10,6 @@ Gold Scalp AI Monitor v6 - Railway Edition (Twelve Data Primary)
 - جلسات لندن، نيويورك، طوكيو، سيدني
 - تخصيص نسبة المخاطرة
 - إشعار قبل الأخبار العاجلة
-- إشعار بداية الجلسة
-- إشعار نهاية الجلسة
--  ربط تحليل الذهب بـ DXY
-- ملخص أداء شامل
--  تنبيه التذبذب العالي
-- صورة نمو الرصيد
 """
 
 
@@ -538,4 +532,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
