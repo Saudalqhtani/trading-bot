@@ -740,19 +740,22 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # بدء البوت
-    await application.initialize()
-    await application.start()
+    # بدء البوت بدون polling (نستخدم send_msg فقط للإشعارات)
+    # الأوامر تعمل عبر webhook لاحقاً
+    print("🚀 البوت يعمل في وضع الإشعارات فقط")
+
+
     
     # إشعار بدء التشغيل
     await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
 
-    # تشغيل المهام بدون polling (نستخدم webhook بدلاً)
+    # تشغيل المهام فقط (بدون Telegram polling)
     await asyncio.gather(
         monitor_loop(),
         analysis_loop(),
         report_loop(),
     )
+
 
 
 if __name__ == "__main__":
