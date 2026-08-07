@@ -14,7 +14,8 @@ Gold Scalp AI Monitor v5.3 - Railway Edition (Twelve Data Primary)
 
 
 
-import os
+
+enhanced_code = '''import os
 import json
 import asyncio
 import aiohttp
@@ -35,8 +36,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SYMBOL = "XAU/USD"
 DXY_SYMBOL = "DXY"
 MONITOR_INTERVAL = 15
-ANALYSIS_INTERVAL = 300
-MIN_CONFIDENCE = 75
+ANALYSIS_INTERVAL = 180  # 3 دقائق بدلاً من 5 (أسرع)
+MIN_CONFIDENCE = 70  # خفضتها قليلاً لتكون أكثر مرونة
 GEMINI_MODEL = "gemini-1.5-flash"
 PIP_VALUE = 1.0
 
@@ -77,6 +78,9 @@ db = {
     "equity_history": [],
     "initial_balance": 10000.0,
     "current_balance": 10000.0,
+    "analysis_count": 0,  # عداد التحاليل
+    "last_hold_reason": "",  # سبب آخر قرار HOLD
+    "api_errors": [],  # تسجيل أخطاء API
 }
 db_lock = asyncio.Lock()
 
@@ -119,6 +123,12 @@ GOLD_SCALP_PROMPT = """
 10. Sentiment Agent: مناطق تجمعات الـ Stop Loss المحتملة.
 11. News & Macro Filter Agent: حظر الدخول قبل/بعد أخبار عالية التأثير بـ 20 دقيقة.
 12. Dynamic Risk Guard Agent: لا يوجد سقف رقمي ثابت لعدد النقاط. ضع SL خلف أقرب نقطة هيكلية حقيقية، مع نسبة ريسك لا تقل عن 1:2.
+
+### ⚠️ تعليمات مهمة جداً:
+- إذا كانت الإشارة BUY أو SELL، يجب أن تكون نسبة الثقة 70% أو أعلى.
+- إذا لم تكن هناك فرصة واضحة، أرجع HOLD مع ذكر السبب المحدد.
+- لا تُرجع HOLD بشكل افتراضي - حلل البيانات فعلياً.
+- إذا كان السعر في منطقة عرض/طلب واضحة مع تأكيد من DXY، أصدر إشارة.
 
 ### [صيغة المخرج]: أعطني النتيجة حصرياً على شكل نص عادي (Plain Text) مرتب بأسطر وخطوط واضحة، وبدون استخدام أقواس JSON أو رموز برمجة خاصة:
 القرار النهائي: [BUY / SELL / HOLD]
@@ -180,54 +190,102 @@ def get_all_active_sessions():
     return active
 
 
+def parse_signal_decision(text: str):
+    """استخراج القرار ونسبة الثقة من نص التحليل"""
+    decision = "HOLD"
+    confidence = 0
+    
+    # البحث عن القرار
+    if "القرار النهائي:" in text:
+        line = text.split("القرار النهائي:")[1].split("\\n")[0].strip().upper()
+        if "BUY" in line:
+            decision = "BUY"
+        elif "SELL" in line:
+            decision = "SELL"
+    
+    # البحث عن نسبة الثقة
+    if "نسبة الثقة:" in text:
+        try:
+            conf_line = text.split("نسبة الثقة:")[1].split("\\n")[0].strip()
+            # استخراج الرقم
+            numbers = re.findall(r'\\d+', conf_line)
+            if numbers:
+                confidence = int(numbers[0])
+        except:
+            pass
+    
+    return decision, confidence
+
+
 # ============ دوال الـ API (Twelve Data) ============
 async def send_msg(text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            resp.raise_for_status()
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ فشل إرسال رسالة Telegram: {e}")
+        async with db_lock:
+            db["api_errors"].append({"time": now_str(), "error": str(e), "type": "telegram_send"})
 
 
 async def send_photo(photo_path: str, caption: str = ""):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    with open(photo_path, "rb") as f:
-        data = aiohttp.FormData()
-        data.add_field("chat_id", TELEGRAM_CHAT_ID)
-        data.add_field("photo", f)
-        data.add_field("caption", caption)
-        data.add_field("parse_mode", "HTML")
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                resp.raise_for_status()
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        with open(photo_path, "rb") as f:
+            data = aiohttp.FormData()
+            data.add_field("chat_id", TELEGRAM_CHAT_ID)
+            data.add_field("photo", f)
+            data.add_field("caption", caption)
+            data.add_field("parse_mode", "HTML")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ فشل إرسال صورة Telegram: {e}")
 
 
 async def fetch_tf(interval: str, symbol: str = SYMBOL):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": 20,
-        "apikey": TWELVE_DATA_API_KEY
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            data = await resp.json()
-            if "code" in data and data["code"] != 200:
-                print(f"⚠️ تحذير Twelve Data للفريم {interval}: {data.get('message')}")
-                return {}
-            
-            if "values" in data:
-                candles = data["values"]
-                if candles:
+    """جلب بيانات الشموع وتحديث السعر اللحظي تلقائياً من أحدث شمعة"""
+    try:
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "outputsize": 20,
+            "apikey": TWELVE_DATA_API_KEY
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                
+                if "code" in data and data["code"] != 200:
+                    error_msg = data.get('message', 'Unknown error')
+                    print(f"⚠️ Twelve Data خطأ للفريم {interval}: {error_msg}")
+                    async with db_lock:
+                        db["api_errors"].append({"time": now_str(), "error": error_msg, "type": f"twelvedata_{interval}"})
+                    return {}
+                
+                if "values" in data and data["values"]:
+                    candles = data["values"]
                     current_close = float(candles[0]["close"])
                     async with db_lock:
                         if symbol == SYMBOL:
                             db["last_price"] = current_close
                         elif symbol == DXY_SYMBOL:
                             db["dxy_price"] = current_close
-                return candles
-            return {}
+                    return candles
+                else:
+                    print(f"⚠️ Twelve Data: لا توجد بيانات للفريم {interval}")
+                    return {}
+                    
+    except Exception as e:
+        print(f"❌ استثناء في fetch_tf {interval}: {e}")
+        async with db_lock:
+            db["api_errors"].append({"time": now_str(), "error": str(e), "type": f"fetch_tf_{interval}"})
+        return {}
 
 
 async def fetch_price():
@@ -244,31 +302,62 @@ async def fetch_dxy_price():
 
 async def fetch_all_tf():
     result = {}
+    errors = []
     for label, interval in TIMEFRAMES.items():
         try:
-            result[label] = await fetch_tf(interval)
-            await asyncio.sleep(1)
+            data = await fetch_tf(interval)
+            if data:
+                result[label] = data
+            else:
+                errors.append(label)
+            await asyncio.sleep(0.5)  # أسرع قليلاً
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
+            errors.append(label)
             result[label] = {}
+    
+    if errors:
+        print(f"⚠️ فشل جلب الفريمات: {errors}")
+    
     return result
 
 
 async def analyze_gemini(tf_data: dict, dxy_price: float):
-    prompt = GOLD_SCALP_PROMPT.format(
-        data_m30=json.dumps(tf_data.get("M30", {})),
-        data_m15=json.dumps(tf_data.get("M15", {})),
-        data_m5=json.dumps(tf_data.get("M5", {})),
-        data_m1=json.dumps(tf_data.get("M1", {})),
-        dxy_price=dxy_price,
-    )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 6000}}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-            result = await resp.json()
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            return text.strip()
+    try:
+        prompt = GOLD_SCALP_PROMPT.format(
+            data_m30=json.dumps(tf_data.get("M30", {})),
+            data_m15=json.dumps(tf_data.get("M15", {})),
+            data_m5=json.dumps(tf_data.get("M5", {})),
+            data_m1=json.dumps(tf_data.get("M1", {})),
+            dxy_price=dxy_price,
+        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 6000}}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                result = await resp.json()
+                
+                # التحقق من وجود أخطاء
+                if "error" in result:
+                    error_msg = result["error"].get("message", "Unknown Gemini error")
+                    print(f"❌ Gemini API خطأ: {error_msg}")
+                    async with db_lock:
+                        db["api_errors"].append({"time": now_str(), "error": error_msg, "type": "gemini"})
+                    return f"ERROR: {error_msg}"
+                
+                if "candidates" not in result or not result["candidates"]:
+                    print("❌ Gemini: لا توجد candidates في الرد")
+                    return "ERROR: No candidates"
+                
+                text = result["candidates"][0]["content"]["parts"][0]["text"]
+                return text.strip()
+                
+    except Exception as e:
+        print(f"❌ استثناء في analyze_gemini: {e}")
+        async with db_lock:
+            db["api_errors"].append({"time": now_str(), "error": str(e), "type": "gemini_exception"})
+        return f"ERROR: {str(e)}"
 
 
 # ============ حساب ATR ============
@@ -297,43 +386,59 @@ async def calculate_atr(candles: list, period: int = 14):
 
 # ============ الأخبار ============
 async def fetch_forex_news():
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            xml_data = await resp.text()
-            root = ET.fromstring(xml_data)
-            news_list = []
-            now = datetime.now(timezone.utc)
-            for event in root.findall('event'):
-                currency = event.find('country').text
-                impact = event.find('impact').text
-                time_str = event.find('date').text + ' ' + event.find('time').text
-                event_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                if currency == 'USD' and impact == 'High':
-                    minutes_until = (event_time - now).total_seconds() / 60
-                    news_list.append({
-                        'title': event.find('title').text,
-                        'time': event_time,
-                        'minutes_until': minutes_until
-                    })
-            return news_list
+    try:
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                xml_data = await resp.text()
+                root = ET.fromstring(xml_data)
+                news_list = []
+                now = datetime.now(timezone.utc)
+                for event in root.findall('event'):
+                    try:
+                        currency = event.find('country').text
+                        impact = event.find('impact').text
+                        time_str = event.find('date').text + ' ' + event.find('time').text
+                        event_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        if currency == 'USD' and impact == 'High':
+                            minutes_until = (event_time - now).total_seconds() / 60
+                            news_list.append({
+                                'title': event.find('title').text,
+                                'time': event_time,
+                                'minutes_until': minutes_until
+                            })
+                    except:
+                        continue
+                return news_list
+    except Exception as e:
+        print(f"⚠️ فشل جلب الأخبار: {e}")
+        return []
 
 
 async def check_news_and_block():
     try:
         news_list = await fetch_forex_news()
         now = time.time()
+        blocking_news = []
+        
         for news in news_list:
             if -30 <= news['minutes_until'] <= 20:
                 block_until = now + (news['minutes_until'] + 30) * 60
                 async with db_lock:
                     db["news_blocked_until"] = block_until
-                return True
+                blocking_news.append(news)
+        
+        if blocking_news:
+            titles = "\\n".join([f"• {n['title']} ({n['minutes_until']:.0f}min)" for n in blocking_news[:3]])
+            await send_msg(f"🔴 <b>توقف مؤقت بسبب أخبار:</b>\\n{titles}")
+            return True
+            
         async with db_lock:
             if db["news_blocked_until"] > 0 and now > db["news_blocked_until"]:
                 db["news_blocked_until"] = 0
         return False
     except Exception as e:
+        print(f"⚠️ خطأ في check_news: {e}")
         return False
 
 
@@ -358,14 +463,14 @@ async def session_notification_loop():
                         if not db["session_notified"].get(start_key, False):
                             db["session_notified"][start_key] = True
                             emoji = "🟢"
-                            await send_msg(f"{emoji} <b>جلسة {session_name} بدأت!</b>\n\nالسوق الآن نشط. استعد للفرص! 🚀")
+                            await send_msg(f"{emoji} <b>جلسة {session_name} بدأت!</b>\\n\\nالسوق الآن نشط. استعد للفرص! 🚀")
                 
                 if current_hour == end_h and current_minute == 59:
                     async with db_lock:
                         if not db["session_notified"].get(end_key, False):
                             db["session_notified"][end_key] = True
                             emoji = "🔴"
-                            await send_msg(f"{emoji} <b>جلسة {session_name} انتهت</b>\n\nتم إغلاق الجلسة. انتظر الجلسة القادمة! ⏸️")
+                            await send_msg(f"{emoji} <b>جلسة {session_name} انتهت</b>\\n\\nتم إغلاق الجلسة. انتظر الجلسة القادمة! ⏸️")
             
             async with db_lock:
                 two_days_ago = (now - timedelta(days=2)).strftime("%Y%m%d")
@@ -399,9 +504,9 @@ async def atr_alert_loop():
                 
                 if atr > threshold and (time.time() - last_alert) > 1800:
                     await send_msg(
-                        f"⚡ <b>تنبيه: تذبذب عالي!</b>\n\n"
-                        f"ATR الحالي: <code>{atr:.2f}</code> نقاط\n"
-                        f"الحد: <code>{threshold}</code> نقاط\n\n"
+                        f"⚡ <b>تنبيه: تذبذب عالي!</b>\\n\\n"
+                        f"ATR الحالي: <code>{atr:.2f}</code> نقاط\\n"
+                        f"الحد: <code>{threshold}</code> نقاط\\n\\n"
                         f"🚨 السوق متقلب جداً. انتبه للمخاطر!"
                     )
                     async with db_lock:
@@ -519,18 +624,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📊 ملخص شهري", callback_data="monthly")],
         [InlineKeyboardButton("📈 رسم الرصيد", callback_data="equity_chart"),
          InlineKeyboardButton("⚡ ATR", callback_data="atr")],
+        [InlineKeyboardButton("🔍 سجل الأخطاء", callback_data="errors"),
+         InlineKeyboardButton("🔄 تحليل فوري", callback_data="force_analysis")],
         [InlineKeyboardButton("⏸️ إيقاف", callback_data="pause"),
          InlineKeyboardButton("▶️ استئناف", callback_data="resume")],
     ]
     reply = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🤖 <b>بوت الذهب الذكي - النسخة المحسّنة</b>\n\n"
-        "✅ الميزات الجديدة:\n"
-        "• 🟢🔴 إشعارات بداية/نهاية الجلسات\n"
-        "• 📊 ربط DXY مع التحليل\n"
-        "• 📈 ملخص أداء أسبوعي/شهري\n"
-        "• ⚡ تنبيه التذبذب العالي (ATR)\n"
-        "• 📉 رسم بياني لنمو الرصيد\n\n"
+        "🤖 <b>بوت الذهب الذكي - النسخة المحسّنة</b>\\n\\n"
+        "✅ الميزات الجديدة:\\n"
+        "• 🟢🔴 إشعارات بداية/نهاية الجلسات\\n"
+        "• 📊 ربط DXY مع التحليل\\n"
+        "• 📈 ملخص أداء أسبوعي/شهري\\n"
+        "• ⚡ تنبيه التذبذب العالي (ATR)\\n"
+        "• 📉 رسم بياني للرصيد\\n"
+        "• 🔍 سجل الأخطاء\\n"
+        "• 🔄 تحليل فوري\\n\\n"
         "اختر أحد الخيارات:",
         parse_mode="HTML",
         reply_markup=reply
@@ -546,6 +655,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         blocked = time.time() < db["news_blocked_until"]
         atr_current = db["atr_data"]["current"]
         dxy = db["dxy_price"]
+        analysis_count = db["analysis_count"]
+        last_hold = db["last_hold_reason"]
+        errors_count = len(db["api_errors"])
     
     status = "⏸️ متوقف" if paused else "✅ يعمل"
     trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
@@ -558,10 +670,13 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 الجلسات النشطة: {active_sessions}
 الصفقة: {trade_status}
 إشارات اليوم: {signals_count}
+عدد التحاليل: {analysis_count}
 نسبة المخاطرة: {risk}%
 الأخبار: {news_status}
 ATR الحالي: {atr_current:.2f} نقاط
 سعر DXY: {dxy:.2f}
+أخطاء API: {errors_count}
+آخر سبب HOLD: {last_hold[:100] if last_hold else "لا يوجد"}
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -570,7 +685,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         price = await fetch_price()
         dxy = await fetch_dxy_price()
-        msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD\nDXY: <code>{dxy:.2f}</code>"
+        msg = f"💵 <b>سعر الذهب</b>\\n\\nXAU/USD: <code>{price:,.2f}</code> USD\\nDXY: <code>{dxy:.2f}</code>"
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
@@ -582,7 +697,7 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⏳ لا توجد إشارات بعد")
             return
         last = db["signals"][-1]
-    msg = f"📈 <b>آخر إشارة</b>\n\n{last['text']}"
+    msg = f"📈 <b>آخر إشارة</b>\\n\\n{last['text']}"
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
@@ -594,6 +709,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         risk = db["risk_percent"]
         balance = db["current_balance"]
         initial = db["initial_balance"]
+        analysis_count = db["analysis_count"]
     
     msg = f"""
 📉 <b>إحصائيات الأداء</b>
@@ -603,6 +719,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 نسبة الربح: {win_rate:.1f}%
 إجمالي النقاط: {stats["total_pips"]:+.1f}
 نسبة المخاطرة: {risk}%
+عدد التحاليل: {analysis_count}
 
 💵 الرصيد: {balance:,.2f} USD
 📈 الربح/خسارة: {(balance - initial):+,.2f} USD
@@ -627,7 +744,7 @@ async def cmd_equity_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with db_lock:
             balance = db["current_balance"]
             initial = db["initial_balance"]
-        caption = f"📈 <b>نمو الرصيد</b>\nالرصيد الحالي: <code>{balance:,.2f}</code> USD\nالربح/خسارة: <code>{(balance - initial):+,.2f}</code> USD"
+        caption = f"📈 <b>نمو الرصيد</b>\\nالرصيد الحالي: <code>{balance:,.2f}</code> USD\\nالربح/خسارة: <code>{(balance - initial):+,.2f}</code> USD"
         await send_photo(chart_path, caption)
     else:
         await update.message.reply_text("❌ فشل إنشاء الرسم البياني")
@@ -648,6 +765,64 @@ ATR الحالي: {atr:.2f} نقاط
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
+async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_lock:
+        errors = db["api_errors"][-10:]  # آخر 10 أخطاء
+    
+    if not errors:
+        await update.message.reply_text("✅ لا توجد أخطاء مسجلة")
+        return
+    
+    msg = "🔍 <b>سجل الأخطاء (آخر 10):</b>\\n\\n"
+    for i, err in enumerate(errors, 1):
+        msg += f"{i}. [{err['time']}] {err['type']}: {err['error'][:80]}\\n"
+    
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إجبار البوت على إجراء تحليل فوري"""
+    await update.message.reply_text("🔄 <b>جاري التحليل الفوري...</b>", parse_mode="HTML")
+    
+    try:
+        # جلب البيانات
+        tf_data = await fetch_all_tf()
+        dxy_price = await fetch_dxy_price()
+        
+        # التحقق من جودة البيانات
+        missing = [k for k, v in tf_data.items() if not v]
+        if missing:
+            await update.message.reply_text(f"⚠️ بيانات ناقصة للفريمات: {', '.join(missing)}")
+            return
+        
+        # التحليل
+        analysis_text = await analyze_gemini(tf_data, dxy_price)
+        
+        if analysis_text.startswith("ERROR"):
+            await update.message.reply_text(f"❌ <b>خطأ في التحليل:</b>\\n{analysis_text}")
+            return
+        
+        # استخراج القرار
+        decision, confidence = parse_signal_decision(analysis_text)
+        
+        async with db_lock:
+            db["analysis_count"] += 1
+            db["signals"].append({"text": analysis_text, "time": now_str(), "forced": True})
+            
+            if decision == "HOLD":
+                db["last_hold_reason"] = analysis_text[:200]
+        
+        # إرسال النتيجة
+        emoji = "🟢" if decision == "BUY" else "🔴" if decision == "SELL" else "⏸️"
+        await send_msg(
+            f"{emoji} <b>تحليل فوري ({decision} - ثقة {confidence}%)</b>\\n\\n"
+            f"{analysis_text}"
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ <b>خطأ في التحليل الفوري:</b>\\n{str(e)}")
+
+
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         current_risk = db["risk_percent"]
@@ -657,7 +832,7 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 0.1 <= new_risk <= 5.0:
                 async with db_lock:
                     db["risk_percent"] = new_risk
-                await update.message.reply_text(f"✅ <b>تم تعديل نسبة المخاطرة</b>\nالجديدة: <code>{new_risk}%</code>", parse_mode="HTML")
+                await update.message.reply_text(f"✅ <b>تم تعديل نسبة المخاطرة</b>\\nالجديدة: <code>{new_risk}%</code>", parse_mode="HTML")
             else:
                 await update.message.reply_text("❌ يجب أن تكون بين 0.1% و 5.0%", parse_mode="HTML")
         except ValueError:
@@ -690,6 +865,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /monthly - ملخص شهري
 /equity - رسم بياني للرصيد
 /atr - مؤشر التذبذب
+/errors - سجل الأخطاء
+/force - تحليل فوري
 /risk - نسبة المخاطرة
 /pause - إيقاف مؤقت
 /resume - استئناف
@@ -716,6 +893,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_equity_chart(query, context)
     elif query.data == "atr":
         await cmd_atr(query, context)
+    elif query.data == "errors":
+        await cmd_errors(query, context)
+    elif query.data == "force_analysis":
+        await cmd_force_analysis(query, context)
     elif query.data == "pause":
         async with db_lock:
             db["paused"] = True
@@ -747,10 +928,12 @@ async def monitor_loop():
             
             await asyncio.sleep(MONITOR_INTERVAL)
         except Exception as e:
+            print(f"❌ خطأ في monitor_loop: {e}")
             await asyncio.sleep(MONITOR_INTERVAL)
 
 
 async def analysis_loop():
+    """حلقة التحليل الرئيسية - محسّنة مع تسجيل مفصل"""
     while True:
         try:
             async with db_lock:
@@ -761,28 +944,95 @@ async def analysis_loop():
                 elapsed = time.time() - db["last_analysis_ts"]
 
             if not has_trade and elapsed >= ANALYSIS_INTERVAL:
+                print(f"🔍 [analysis_loop] بدء تحليل جديد - elapsed: {elapsed:.0f}s")
+                
+                # فحص الأخبار
                 news_blocked = await check_news_and_block()
                 if news_blocked:
+                    print("🔴 [analysis_loop] موقف بسبب أخبار")
                     await asyncio.sleep(60)
                     continue
                 
+                # فحص الجلسة
                 if not is_valid_session():
+                    session = get_session_name()
+                    print(f"⏸️ [analysis_loop] خارج الجلسات: {session}")
                     async with db_lock:
                         db["last_analysis_ts"] = time.time()
+                    await asyncio.sleep(60)
+                    continue
+                
+                # جلب البيانات
+                print("📊 [analysis_loop] جلب بيانات الشموع...")
+                tf_data = await fetch_all_tf()
+                
+                # التحقق من جودة البيانات
+                missing_frames = [k for k, v in tf_data.items() if not v]
+                if missing_frames:
+                    print(f"⚠️ [analysis_loop] بيانات ناقصة: {missing_frames}")
+                    await send_msg(f"⚠️ <b>تحذير:</b> بيانات ناقصة للفريمات: {', '.join(missing_frames)}")
+                
+                # جلب DXY
+                print("💵 [analysis_loop] جلب سعر DXY...")
+                dxy_price = await fetch_dxy_price()
+                
+                # التحليل
+                print("🤖 [analysis_loop] إرسال للتحليل إلى Gemini...")
+                analysis_text = await analyze_gemini(tf_data, dxy_price)
+                
+                if analysis_text.startswith("ERROR"):
+                    print(f"❌ [analysis_loop] خطأ Gemini: {analysis_text}")
+                    await send_msg(f"❌ <b>خطأ في التحليل:</b>\\n{analysis_text}")
+                    async with db_lock:
+                        db["last_analysis_ts"] = time.time()
+                    await asyncio.sleep(60)
+                    continue
+                
+                # استخراج القرار
+                decision, confidence = parse_signal_decision(analysis_text)
+                print(f"📈 [analysis_loop] القرار: {decision} | الثقة: {confidence}%")
+                
+                async with db_lock:
+                    db["last_analysis_ts"] = time.time()
+                    db["analysis_count"] += 1
+                    db["signals"].append({"text": analysis_text, "time": now_str()})
+                    
+                    if decision == "HOLD":
+                        db["last_hold_reason"] = analysis_text[:300]
+                
+                # إرسال الإشارة (BUY/SELL فقط إذا كانت الثقة كافية)
+                if decision in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE:
+                    emoji = "🟢" if decision == "BUY" else "🔴"
+                    await send_msg(
+                        f"{emoji} <b>إشارة تداول جديدة ({decision} - ثقة {confidence}%)</b>\\n\\n"
+                        f"{analysis_text}"
+                    )
+                    print(f"✅ [analysis_loop] إشارة مرسلة: {decision}")
+                elif decision in ["BUY", "SELL"] and confidence < MIN_CONFIDENCE:
+                    await send_msg(
+                        f"⏸️ <b>فرصة ضعيفة ({decision} - ثقة {confidence}% فقط)</b>\\n\\n"
+                        f"الحد الأدنى للثقة: {MIN_CONFIDUE}%\\n"
+                        f"تم تجاهل الإشارة."
+                    )
+                    print(f"⏸️ [analysis_loop] ثقة منخفضة: {confidence}%")
                 else:
-                    tf_data = await fetch_all_tf()
-                    dxy_price = await fetch_dxy_price()
-                    analysis_text = await analyze_gemini(tf_data, dxy_price)
-                    
+                    # HOLD - إرسال ملخص كل 3 تحاليل
                     async with db_lock:
-                        db["last_analysis_ts"] = time.time()
-                        db["signals"].append({"text": analysis_text, "time": now_str()})
-                    
-                    await send_msg(f"📈 <b>إشارة تداول جديدة:</b>\n\n{analysis_text}")
+                        count = db["analysis_count"]
+                    if count % 3 == 0:
+                        await send_msg(
+                            f"⏸️ <b>لا توجد فرص واضحة (HOLD)</b>\\n\\n"
+                            f"عدد التحاليل: {count}\\n"
+                            f"الجلسة: {get_session_name()}\\n\\n"
+                            f"<i>سيتم إرسال إشارة عند ظهور فرصة واضحة...</i>"
+                        )
+                    print(f"⏸️ [analysis_loop] HOLD - ثقة: {confidence}%")
 
             await asyncio.sleep(5)
         except Exception as e:
-            await asyncio.sleep(5)
+            print(f"❌ [analysis_loop] استثناء: {e}")
+            await send_msg(f"❌ <b>خطأ في حلقة التحليل:</b>\\n<code>{str(e)[:200]}</code>")
+            await asyncio.sleep(10)
 
 
 async def daily_report():
@@ -791,6 +1041,7 @@ async def daily_report():
         risk = db["risk_percent"]
         balance = db["current_balance"]
         initial = db["initial_balance"]
+        analysis_count = db["analysis_count"]
     
     msg = f"""
 📅 <b>التقرير اليومي</b>
@@ -798,17 +1049,22 @@ async def daily_report():
 المخاطرة: {risk}%
 الرصيد: {balance:,.2f} USD
 الربح/خسارة: {(balance - initial):+,.2f} USD
+عدد التحاليل: {analysis_count}
     """
     await send_msg(msg)
 
 
 async def report_loop():
     while True:
-        now = datetime.now(timezone.utc)
-        next_report = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
-        wait = (next_report - now).total_seconds()
-        await asyncio.sleep(wait)
-        await daily_report()
+        try:
+            now = datetime.now(timezone.utc)
+            next_report = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
+            wait = (next_report - now).total_seconds()
+            await asyncio.sleep(wait)
+            await daily_report()
+        except Exception as e:
+            print(f"❌ خطأ في report_loop: {e}")
+            await asyncio.sleep(3600)
 
 
 # ============ نقطة الدخول ============
@@ -824,6 +1080,8 @@ async def main():
     application.add_handler(CommandHandler("monthly", cmd_monthly))
     application.add_handler(CommandHandler("equity", cmd_equity_chart))
     application.add_handler(CommandHandler("atr", cmd_atr))
+    application.add_handler(CommandHandler("errors", cmd_errors))
+    application.add_handler(CommandHandler("force", cmd_force_analysis))
     application.add_handler(CommandHandler("risk", cmd_risk))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
@@ -835,7 +1093,23 @@ async def main():
     await application.updater.start_polling(drop_pending_updates=True)
     
     print("🚀 البوت يعمل مع Twelve Data - جاهز!")
-    await send_msg("🚀 <b>بوت الذهب يعمل الآن بنجاح!</b>\n\n✅ الميزات الجديدة:\n• إشعارات الجلسات\n• ربط DXY\n• ملخص أسبوعي/شهري\n• تنبيه ATR\n• رسم بياني للرصيد")
+    
+    # إشعار بدء التشغيل مع معلومات مفيدة
+    startup_msg = (
+        "🚀 <b>بوت الذهب يعمل الآن بنجاح!</b>\\n\\n"
+        "✅ الميزات الجديدة:\\n"
+        "• إشعارات الجلسات\\n"
+        "• ربط DXY\\n"
+        "• ملخص أسبوعي/شهري\\n"
+        "• تنبيه ATR\\n"
+        "• رسم بياني للرصيد\\n"
+        "• 🔍 سجل الأخطاء\\n"
+        "• 🔄 تحليل فوري\\n\\n"
+        f"⏰ الجلسة الحالية: {get_session_name()}\\n"
+        f"📊 فترة التحليل: كل {ANALYSIS_INTERVAL//60} دقائق\\n"
+        f"🎯 الحد الأدنى للثقة: {MIN_CONFIDENCE}%"
+    )
+    await send_msg(startup_msg)
 
     await asyncio.gather(
         monitor_loop(),
@@ -848,3 +1122,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+'''
+
+with open('/mnt/agents/output/gold_bot_fixed.py', 'w', encoding='utf-8') as f:
+    f.write(enhanced_code)
+
