@@ -159,20 +159,28 @@ async def send_msg(text: str):
 
 
 async def fetch_price():
-    """جلب سعر الذهب من Alpha Vantage"""
+    """جلب سعر الذهب الفوري من أحدث شمعة في Alpha Vantage"""
     url = "https://www.alphavantage.co/query"
     params = {
-        "function": "CURRENCY_EXCHANGE_RATE",
-        "from_currency": "XAU",
-        "to_currency": "USD",
+        "function": "TIME_SERIES_INTRADAY",
+        "symbol": "XAUUSD",
+        "interval": "1min",
         "apikey": ALPHA_VANTAGE_API_KEY
     }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
-            rate_data = data.get("Realtime Currency Exchange Rate", {})
-            if "5. Exchange Rate" in rate_data:
-                price = float(rate_data["5. Exchange Rate"])
+            
+            time_series_key = None
+            for key in data:
+                if "Time Series" in key:
+                    time_series_key = key
+                    break
+            
+            if time_series_key and time_series_key in data:
+                candles = data[time_series_key]
+                latest_time = sorted(candles.keys())[-1]
+                price = float(candles[latest_time]["4. close"])
             else:
                 raise RuntimeError(f"Unexpected Alpha Vantage response: {json.dumps(data)}")
             
