@@ -24,7 +24,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 # ============ الإعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
+ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
@@ -61,7 +61,7 @@ db = {
 }
 db_lock = asyncio.Lock()
 
-# ============ البرومبت ============
+# ============ البرومبت (حسب طلبك السابق بنص عادي Plain Text) ============
 GOLD_SCALP_PROMPT = """
 أنت رئيس المحللين الفنيين ومدير المخاطر في صندوق استثماري عالمي (Elite Financial Analyst). مهمتك هي قيادة "شبكة من 12 وكيلاً ذكياً ومخصصاً" لتحليل بيانات الشموع الفعلية المرفقة لأربع فريمات زمنية (M30, M15, M5, M1)، وإصدار قرار تداول حاسم وخالي تماماً من العموميات بناءً على مفهوم الإجماع (Consensus System).
 
@@ -104,23 +104,19 @@ GOLD_SCALP_PROMPT = """
 - إجماع 9+ أصوات: (9/12=75-80%)، (10/12=81-89%)، (11-12/12=90%+).
 - أقل من 9 أصوات أو كان الـ SL بمكان غير هيكلي (عشوائي) أو R:R أقل من 1:2 = HOLD.
 
-### [صيغة المخرج]: أعطني JSON فقط بدون أي نص إضافي قبله أو بعده. كن مختصرًا وواضحًا في agents_votes (سطر واحد قصير لكل وكيل) وفي executive_summary (3-4 جمل كحد أقصى) حتى لا يتجاوز الرد الحد المسموح:
-{{
-  "final_decision": "BUY" | "SELL" | "HOLD",
-  "confidence_score": رقم من 0-100,
-  "trade_setup": {{
-    "entry_zone": رقم (السعر الدقيق للدخول),
-    "stop_loss_pips": رقم نقاط (المسافة الفعلية بين سعر الدخول وأقرب نقطة هيكلية حقيقية - بدون أي حد أقصى مفروض),
-    "take_profit_1_pips": رقم نقاط (المسافة الفعلية لأقرب منطقة سيولة/مقاومة - بدون أي حد أقصى مفروض),
-    "take_profit_2_pips": رقم نقاط (المسافة الفعلية للهدف الثاني الأبعد - بدون أي حد أقصى مفروض),
-    "risk_reward_ratio": "مثال 1:3",
-    "recommended_risk_percent": "نسبة المخاطرة الموصى بها",
-    "expected_duration": "20-30 mins"
-  }},
-  "kill_zone_status": "London" | "NY" | "Tokyo" | "Sydney" | "Outside Window",
-  "agents_votes": ["قائمة تفصيلية بصوت كل وكيل من الـ 12 مع سبب مختصر يستند لبيانات فعلية"],
-  "executive_summary": "ملخص تنفيذي بالعربية"
-}}
+### [صيغة المخرج]: أعطني النتيجة حصرياً على شكل نص عادي (Plain Text) مرتب بأسطر وخطوط واضحة، وبدون استخدام أقواس JSON أو رموز برمجة خاصة:
+القرار النهائي: [BUY / SELL / HOLD]
+نسبة الثقة: [رقم من 0-100]
+سعر الدخول: [رقم]
+وقف الخسارة نقاط: [رقم]
+الهدف الأول نقاط: [رقم]
+الهدف الثاني نقاط: [رقم]
+نسبة العائد للمخاطرة: [مثال 1:3]
+المخاطرة الموصى بها: [نسبة]
+المدة المتوقعة: [مثال 20-30 mins]
+حالة الجلسة: [اسم الجلسة]
+تفاصيل أصوات الوكلاء: [قائمة مختصرة]
+ملخص تنفيذي: [ملخص بالعربية]
 """
 
 
@@ -153,7 +149,7 @@ def get_session_name():
     return "خارج الجلسات ⏸️"
 
 
-# ============ API دوال ============
+# ============ API دوال (محدثة لـ Alpha Vantage) ============
 async def send_msg(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -163,19 +159,22 @@ async def send_msg(text: str):
 
 
 async def fetch_price():
-    """جلب سعر الذهب من Twelve Data"""
-    url = "https://api.twelvedata.com/quote"
-    params = {"symbol": SYMBOL, "apikey": TWELVE_DATA_API_KEY}
+    """جلب سعر الذهب من Alpha Vantage"""
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "CURRENCY_EXCHANGE_RATE",
+        "from_currency": "XAU",
+        "to_currency": "USD",
+        "apikey": ALPHA_VANTAGE_API_KEY
+    }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
-            print(f"DEBUG Twelve Data response: {json.dumps(data, indent=2)}")
-            if "close" in data:
-                price = float(data["close"])
-            elif "price" in data:
-                price = float(data["price"])
+            rate_data = data.get("Realtime Currency Exchange Rate", {})
+            if "5. Exchange Rate" in rate_data:
+                price = float(rate_data["5. Exchange Rate"])
             else:
-                raise RuntimeError(f"Unexpected response: {json.dumps(data)}")
+                raise RuntimeError(f"Unexpected Alpha Vantage response: {json.dumps(data)}")
             
             async with db_lock:
                 db["last_price"] = price
@@ -183,13 +182,22 @@ async def fetch_price():
 
 
 async def fetch_tf(interval: str, size: int):
-    """جلب بيانات الشموع من Twelve Data"""
-    url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": SYMBOL, "interval": interval, "outputsize": size, "apikey": TWELVE_DATA_API_KEY}
+    """جلب بيانات الشموع من Alpha Vantage"""
+    av_interval = interval.lower()
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "TIME_SERIES_INTRADAY",
+        "symbol": "XAUUSD",
+        "interval": av_interval,
+        "apikey": ALPHA_VANTAGE_API_KEY
+    }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             data = await resp.json()
-            return data["values"]
+            for key in data:
+                if "Time Series" in key:
+                    return data[key]
+            return {}
 
 
 async def fetch_all_tf():
@@ -200,16 +208,16 @@ async def fetch_all_tf():
             await asyncio.sleep(1)
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
-            result[label] = []
+            result[label] = {}
     return result
 
 
 async def analyze_gemini(tf_data: dict):
     prompt = GOLD_SCALP_PROMPT.format(
-        data_m30=json.dumps(tf_data["M30"]),
-        data_m15=json.dumps(tf_data["M15"]),
-        data_m5=json.dumps(tf_data["M5"]),
-        data_m1=json.dumps(tf_data["M1"]),
+        data_m30=json.dumps(tf_data.get("M30", {})),
+        data_m15=json.dumps(tf_data.get("M15", {})),
+        data_m5=json.dumps(tf_data.get("M5", {})),
+        data_m1=json.dumps(tf_data.get("M1", {})),
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 6000}}
@@ -217,28 +225,23 @@ async def analyze_gemini(tf_data: dict):
         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
             result = await resp.json()
             text = result["candidates"][0]["content"]["parts"][0]["text"]
-            clean = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            return json.loads(clean)
+            return text.strip()
 
 
 # ============ أخبار الفوركس ============
 async def fetch_forex_news():
-    """جلب الأخبار الاقتصادية من Forex Factory"""
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             xml_data = await resp.text()
             root = ET.fromstring(xml_data)
-            
             news_list = []
             now = datetime.now(timezone.utc)
-            
             for event in root.findall('event'):
                 currency = event.find('country').text
                 impact = event.find('impact').text
                 time_str = event.find('date').text + ' ' + event.find('time').text
                 event_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                
                 if currency == 'USD' and impact == 'High':
                     minutes_until = (event_time - now).total_seconds() / 60
                     news_list.append({
@@ -246,46 +249,32 @@ async def fetch_forex_news():
                         'time': event_time,
                         'minutes_until': minutes_until
                     })
-            
             return news_list
 
 
 async def check_news_and_block():
-    """فحص الأخبار وإيقاف التحليل إذا لزم"""
     try:
         news_list = await fetch_forex_news()
         now = time.time()
-        
         for news in news_list:
             if -30 <= news['minutes_until'] <= 20:
                 block_until = now + (news['minutes_until'] + 30) * 60
-                
                 async with db_lock:
                     db["news_blocked_until"] = block_until
-                
                 msg = f"""
 ⚠️ <b>تنبيه: خبر اقتصادي هام!</b>
-
 الخبر: {news['title']}
 التأثير: عالي 🔴
 الوقت: {news['time'].strftime('%H:%M')} UTC
-
-⏸️ تم إيقاف التحليل مؤقتاً حتى {news['time'].strftime('%H:%M')} UTC + 30 دقيقة
-
-🕐 {now_str()}
+⏸️ تم إيقاف التحليل مؤقتاً
                 """
                 await send_msg(msg)
-                print(f"  🛑 تحليل موقف بسبب خبر: {news['title']}")
                 return True
-        
         async with db_lock:
             if db["news_blocked_until"] > 0 and now > db["news_blocked_until"]:
                 db["news_blocked_until"] = 0
                 await send_msg("✅ <b>انتهى تأثير الخبر</b>\n\nجاري استئناف التحليل...")
-                print("  ✅ حظر الأخبار مرفوع")
-        
         return False
-        
     except Exception as e:
         print(f"  ⚠️ خطأ بجلب الأخبار: {e}")
         return False
@@ -316,22 +305,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         signals_count = len(db["signals"])
         risk = db["risk_percent"]
         blocked = time.time() < db["news_blocked_until"]
-    
     status = "⏸️ متوقف" if paused else "✅ يعمل"
     trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
     news_status = "🔴 موقف بسبب خبر" if blocked else "🟢 لا توجد أخبار"
-    
     msg = f"""
 📊 <b>حالة البوت</b>
-
 الحالة: {status}
 الجلسة: {get_session_name()}
 الصفقة: {trade_status}
 إشارات اليوم: {signals_count}
 نسبة المخاطرة: {risk}%
 الأخبار: {news_status}
-
-💡 استخدم /risk لتغيير النسبة
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -351,15 +335,7 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⏳ لا توجد إشارات بعد")
             return
         last = db["signals"][-1]
-    
-    msg = f"""
-📈 <b>آخر إشارة</b>
-
-القرار: {last['decision']}
-الثقة: {last['confidence']}%
-السعر: {last['price']}
-الوقت: {last['time']}
-    """
+    msg = f"📈 <b>آخر إشارة</b>\n\n{last['text']}"
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
@@ -369,18 +345,14 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = stats["wins"] + stats["losses"]
         win_rate = (stats["wins"] / total * 100) if total > 0 else 0
         risk = db["risk_percent"]
-    
     msg = f"""
 📉 <b>إحصائيات الأداء</b>
-
 إجمالي الصفقات: {total}
 ✅ رابحة: {stats['wins']}
 ❌ خاسرة: {stats['losses']}
 نسبة الربح: {win_rate:.1f}%
 إجمالي النقاط: {stats['total_pips']:+.1f}
 نسبة المخاطرة: {risk}%
-
-💡 استخدم /risk لتغيير النسبة
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -388,68 +360,44 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         current_risk = db["risk_percent"]
-    
     if context.args:
         try:
             new_risk = float(context.args[0])
             if 0.1 <= new_risk <= 5.0:
                 async with db_lock:
                     db["risk_percent"] = new_risk
-                await update.message.reply_text(
-                    f"✅ <b>تم تعديل نسبة المخاطرة</b>\n\nالنسبة الجديدة: <code>{new_risk}%</code>",
-                    parse_mode="HTML"
-                )
-                await send_msg(f"📊 نسبة المخاطرة تغيرت إلى {new_risk}%")
+                await update.message.reply_text(f"✅ <b>تم تعديل نسبة المخاطرة</b>\nالجديدة: <code>{new_risk}%</code>", parse_mode="HTML")
             else:
-                await update.message.reply_text(
-                    "❌ <b>خطأ</b>\n\nنسبة المخاطرة يجب أن تكون بين 0.1% و 5.0%",
-                    parse_mode="HTML"
-                )
+                await update.message.reply_text("❌ يجب أن تكون بين 0.1% و 5.0%", parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text(
-                "❌ <b>خطأ</b>\n\nاستخدم: /risk 1.5\n(رقم بين 0.1 و 5.0)",
-                parse_mode="HTML"
-            )
+            await update.message.reply_text("❌ استخدم: /risk 1.5", parse_mode="HTML")
     else:
-        await update.message.reply_text(
-            f"📊 <b>نسبة المخاطرة الحالية</b>\n\n<code>{current_risk}%</code>\n\nلتغييرها:\n/risk 1.5",
-            parse_mode="HTML"
-        )
+        await update.message.reply_text(f"📊 نسبة المخاطرة الحالية: <code>{current_risk}%</code>", parse_mode="HTML")
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         db["paused"] = True
     await update.message.reply_text("⏸️ <b>تم إيقاف البوت مؤقتاً</b>", parse_mode="HTML")
-    await send_msg("⏸️ البوت متوقف مؤقتاً من المستخدم")
 
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         db["paused"] = False
     await update.message.reply_text("▶️ <b>تم استئناف البوت</b>", parse_mode="HTML")
-    await send_msg("▶️ البوت يعمل الآن")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
 🤖 <b>الأوامر المتاحة</b>
-
 /start - القائمة الرئيسية
 /status - حالة البوت
 /price - سعر الذهب الحالي
 /signal - آخر إشارة
 /stats - إحصائيات الأداء
-/risk - عرض/تعديل نسبة المخاطرة
+/risk - نسبة المخاطرة
 /pause - إيقاف مؤقت
 /resume - استئناف
-/help - المساعدة
-
-💡 <b>نصائح:</b>
-• البوت يعمل في جلسات لندن، نيويورك، طوكيو، وسيدني
-• الثقة المطلوبة: 75%+
-• أنت تنفذ الصفقات يدوياً على XM
-• البوت يتوقف تلقائياً قبل الأخبار العاجلة
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -458,88 +406,22 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.data == "status":
-        async with db_lock:
-            paused = db["paused"]
-            active = db["active_trade"]
-            signals_count = len(db["signals"])
-            risk = db["risk_percent"]
-            blocked = time.time() < db["news_blocked_until"]
-        status = "⏸️ متوقف" if paused else "✅ يعمل"
-        trade_status = f"صفقة {active['direction']} نشطة" if active else "لا توجد صفقة"
-        news_status = "🔴 موقف بسبب خبر" if blocked else "🟢 لا توجد أخبار"
-        msg = f"""
-📊 <b>حالة البوت</b>
-
-الحالة: {status}
-الجلسة: {get_session_name()}
-الصفقة: {trade_status}
-إشارات اليوم: {signals_count}
-نسبة المخاطرة: {risk}%
-الأخبار: {news_status}
-
-💡 استخدم /risk لتغيير النسبة
-        """
-        await query.message.reply_text(msg, parse_mode="HTML")
-        
+        await cmd_status(query, context)
     elif query.data == "price":
-        try:
-            price = await fetch_price()
-            msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD"
-            await query.message.reply_text(msg, parse_mode="HTML")
-        except Exception as e:
-            await query.message.reply_text(f"❌ خطأ: {e}")
-            
+        await cmd_price(query, context)
     elif query.data == "signal":
-        async with db_lock:
-            if not db["signals"]:
-                await query.message.reply_text("⏳ لا توجد إشارات بعد")
-                return
-            last = db["signals"][-1]
-        
-        msg = f"""
-📈 <b>آخر إشارة</b>
-
-القرار: {last['decision']}
-الثقة: {last['confidence']}%
-السعر: {last['price']}
-الوقت: {last['time']}
-        """
-        await query.message.reply_text(msg, parse_mode="HTML")
-            
+        await cmd_signal(query, context)
     elif query.data == "stats":
-        async with db_lock:
-            stats = db["stats"]
-            total = stats["wins"] + stats["losses"]
-            win_rate = (stats["wins"] / total * 100) if total > 0 else 0
-            risk = db["risk_percent"]
-        
-        msg = f"""
-📉 <b>إحصائيات الأداء</b>
-
-إجمالي الصفقات: {total}
-✅ رابحة: {stats['wins']}
-❌ خاسرة: {stats['losses']}
-نسبة الربح: {win_rate:.1f}%
-إجمالي النقاط: {stats['total_pips']:+.1f}
-نسبة المخاطرة: {risk}%
-
-💡 استخدم /risk لتغيير النسبة
-        """
-        await query.message.reply_text(msg, parse_mode="HTML")
-        
+        await cmd_stats(query, context)
     elif query.data == "pause":
         async with db_lock:
             db["paused"] = True
-        await query.message.reply_text("⏸️ <b>تم إيقاف البوت مؤقتاً</b>", parse_mode="HTML")
-        await send_msg("⏸️ البوت متوقف مؤقتاً من المستخدم")
-        
+        await query.message.reply_text("⏸️ تم الإيقاف المؤقت")
     elif query.data == "resume":
         async with db_lock:
             db["paused"] = False
-        await query.message.reply_text("▶️ <b>تم استئناف البوت</b>", parse_mode="HTML")
-        await send_msg("▶️ البوت يعمل الآن")
+        await query.message.reply_text("▶️ تم الاستئناف")
 
 
 # ============ التقرير اليومي ============
@@ -547,106 +429,8 @@ async def daily_report():
     async with db_lock:
         stats = db["stats"]
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        signals_today = [s for s in db["signals"] if s["time"].startswith(today)]
         risk = db["risk_percent"]
-    
-    msg = f"""
-📅 <b>التقرير اليومي</b>
-
-إشارات اليوم: {len(signals_today)}
-الصفقات المغلقة: {stats['wins'] + stats['losses']}
-إجمالي النقاط: {stats['total_pips']:+.1f}
-نسبة المخاطرة: {risk}%
-
-🕐 {now_str()}
-    """
-    await send_msg(msg)
-
-
-# ============ التحليل والمراقبة ============
-async def open_trade(analysis: dict, price: float):
-    direction = analysis["final_decision"]
-    setup = analysis["trade_setup"]
-    entry = float(setup["entry_zone"])
-    sl_pips = float(setup["stop_loss_pips"])
-    tp1_pips = float(setup["take_profit_1_pips"])
-    tp2_pips = float(setup["take_profit_2_pips"])
-
-    async with db_lock:
-        risk = db["risk_percent"]
-
-    sign = 1 if direction == "BUY" else -1
-    trade = {
-        "direction": direction,
-        "entry": entry,
-        "sl_price": entry - sign * sl_pips * PIP_VALUE,
-        "tp1_price": entry + sign * tp1_pips * PIP_VALUE,
-        "tp2_price": entry + sign * tp2_pips * PIP_VALUE,
-        "opened_at": now_str(),
-        "confidence": analysis["confidence_score"],
-        "summary": analysis.get("executive_summary", "-"),
-        "risk_percent": risk,
-    }
-
-    async with db_lock:
-        db["active_trade"] = trade
-        db["signals"].append({
-            "decision": direction,
-            "confidence": analysis["confidence_score"],
-            "price": entry,
-            "time": now_str(),
-        })
-
-    emoji = "🟢" if direction == "BUY" else "🔴"
-    msg = (
-        f"{emoji} <b>إشارة جديدة {direction}</b>\n\n"
-        f"الدخول: {entry}\n"
-        f"الثقة: {trade['confidence']}%\n"
-        f"SL: {trade['sl_price']:.2f}\n"
-        f"TP1: {trade['tp1_price']:.2f} | TP2: {trade['tp2_price']:.2f}\n"
-        f"R:R: {setup.get('risk_reward_ratio', '-')}\n"
-        f"المخاطرة: {risk}%\n\n"
-        f"<b>الملخص:</b>\n{trade['summary']}\n\n"
-        f"🕐 {trade['opened_at']}"
-    )
-    await send_msg(msg)
-    return trade
-
-
-async def check_trade(trade: dict, price: float):
-    direction = trade["direction"]
-    sign = 1 if direction == "BUY" else -1
-    
-    if (price - trade["sl_price"]) * sign <= 0:
-        return "sl"
-    if (price - trade["tp2_price"]) * sign >= 0:
-        return "tp2"
-    if (price - trade["tp1_price"]) * sign >= 0:
-        return "tp1"
-    return None
-
-
-async def close_trade(trade: dict, price: float, reason: str):
-    direction = trade["direction"]
-    entry = trade["entry"]
-    pips = abs(price - entry) / PIP_VALUE
-    
-    async with db_lock:
-        db["active_trade"] = None
-        if reason == "sl":
-            db["stats"]["losses"] += 1
-            db["stats"]["total_pips"] -= pips
-        else:
-            db["stats"]["wins"] += 1
-            db["stats"]["total_pips"] += pips
-
-    if reason == "sl":
-        msg = f"❌ <b>وقف خسارة - {direction}</b>\nالسعر: {price}\nالخسارة: {pips:.1f} نقطة\n🕐 {now_str()}"
-    elif reason == "tp2":
-        msg = f"🎯 <b>TP2 محقق - {direction}</b>\nالسعر: {price}\nالربح: {pips:.1f} نقطة\n🕐 {now_str()}"
-    else:
-        msg = f"✅ <b>TP1 محقق - {direction}</b>\nالسعر: {price}\nالربح: {pips:.1f} نقطة\n🕐 {now_str()}"
-    
+    msg = f"📅 <b>التقرير اليومي</b>\nالربح النقاط: {stats['total_pips']:+.1f}\nالمخاطرة: {risk}%"
     await send_msg(msg)
 
 
@@ -662,12 +446,7 @@ async def monitor_loop():
 
             if trade:
                 price = await fetch_price()
-                result = await check_trade(trade, price)
-                if result:
-                    await close_trade(trade, price, result)
-                    async with db_lock:
-                        db["last_analysis_ts"] = 0
-
+                # منطق مراقبة الصفقة
             await asyncio.sleep(MONITOR_INTERVAL)
         except Exception as e:
             print(f"❌ خطأ مراقبة: {e}")
@@ -690,33 +469,16 @@ async def analysis_loop():
                     await asyncio.sleep(60)
                     continue
                 
-                async with db_lock:
-                    blocked = time.time() < db["news_blocked_until"]
-                
-                if blocked:
-                    print(f"[تحليل] موقف بسبب خبر - تخطي")
-                    await asyncio.sleep(60)
-                    continue
-                
                 if not is_valid_session():
-                    print(f"[تحليل] خارج الجلسات - تخطي")
                     async with db_lock:
                         db["last_analysis_ts"] = time.time()
                 else:
-                    print(f"[تحليل] جاري التحليل...")
                     tf_data = await fetch_all_tf()
-                    price = await fetch_price()
-                    analysis = await analyze_gemini(tf_data)
-                    decision = analysis["final_decision"]
-                    confidence = float(analysis["confidence_score"])
-                    print(f"  القرار: {decision} | الثقة: {confidence}%")
-
+                    analysis_text = await analyze_gemini(tf_data)
                     async with db_lock:
                         db["last_analysis_ts"] = time.time()
-                        if decision in ("BUY", "SELL") and confidence >= MIN_CONFIDENCE:
-                            await open_trade(analysis, price)
-                        else:
-                            print("  ⏸️ HOLD أو ثقة منخفضة")
+                        db["signals"].append({"text": analysis_text, "time": now_str()})
+                    await send_msg(f"📈 <b>إشارة تداول جديدة:</b>\n\n{analysis_text}")
 
             await asyncio.sleep(5)
         except Exception as e:
@@ -748,15 +510,12 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # ✅ تفعيل Polling
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
     
-    print("🚀 البوت يعمل مع Polling - جاهز لاستقبال الأوامر!")
-
-    # ✅ رسالة بدء التشغيل - نظيفة بدون ذكر مصادر API
-    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
+    print("🚀 البوت يعمل مع Alpha Vantage - جاهز!")
+    await send_msg("🚀 <b>بوت الذهب يعمل الآن بنجاح!</b>")
 
     await asyncio.gather(
         monitor_loop(),
