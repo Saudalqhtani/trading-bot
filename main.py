@@ -58,7 +58,7 @@ db = {
     "last_analysis_ts": 0,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
-    "last_price": 0.0,
+    "last_price": 2650.0, # قيمة افتراضية أولية مؤقتة
 }
 db_lock = asyncio.Lock()
 
@@ -153,33 +153,13 @@ async def send_msg(text: str):
             resp.raise_for_status()
 
 
-async def fetch_price():
-    """جلب السعر اللحظي الحقيقي مباشرة من endpoint الأسعار في Twelve Data"""
-    url = "https://api.twelvedata.com/price"
-    params = {
-        "symbol": SYMBOL,
-        "apikey": TWELVE_DATA_API_KEY
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
-            if "price" in data:
-                price = float(data["price"])
-                async with db_lock:
-                    db["last_price"] = price
-                return price
-            else:
-                async with db_lock:
-                    return db["last_price"]
-
-
 async def fetch_tf(interval: str):
-    """جلب بيانات الشموع من منصة Twelve Data"""
+    """جلب بيانات الشموع وتحديث السعر اللحظي تلقائياً من أحدث شمعة"""
     url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": SYMBOL,
         "interval": interval,
-        "outputsize": 60,
+        "outputsize": 10,
         "apikey": TWELVE_DATA_API_KEY
     }
     async with aiohttp.ClientSession() as session:
@@ -192,11 +172,18 @@ async def fetch_tf(interval: str):
             if "values" in data:
                 candles = data["values"]
                 if candles:
-                    price = float(candles[0]["close"])
+                    current_close = float(candles[0]["close"])
                     async with db_lock:
-                        db["last_price"] = price
+                        db["last_price"] = current_close
                 return candles
             return {}
+
+
+async def fetch_price():
+    """جلب السعر الحالي من خلال سحب أسرع فريم (M1) لتفادي مشاكل الـ Endpoint المباشر"""
+    candles = await fetch_tf("1min")
+    async with db_lock:
+        return db["last_price"]
 
 
 async def fetch_all_tf():
