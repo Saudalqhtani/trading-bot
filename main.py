@@ -34,9 +34,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SYMBOL = "XAU/USD"
 DXY_SYMBOL = "DXY"
 MONITOR_INTERVAL = 15
-ANALYSIS_INTERVAL = 180  # 3 دقائق
+ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 70
-GEMINI_MODEL = "gemini-1.5-flash"
+# ✅ تم التعديل: نموذج Gemini صالح (أغسطس 2026)
+GEMINI_MODEL = "gemini-3.5-flash"
 PIP_VALUE = 1.0
 
 TIMEFRAMES = {
@@ -59,7 +60,7 @@ SESSIONS_CONFIG = {
     "سيدني 🇦🇺": {"start": 22, "end": 7},
 }
 
-# ============ قاعدة البيانات في الذاكرة ============
+# ============ قاعدة البيانات ============
 db = {
     "trades": [],
     "signals": [],
@@ -175,7 +176,7 @@ def get_all_active_sessions():
 
 
 def parse_signal_decision(text: str):
-    """استخراج القرار ونسبة الثقة من نص التحليل"""
+    """استخراج القرار ونسبة الثقة"""
     decision = "HOLD"
     confidence = 0
     
@@ -295,6 +296,7 @@ async def fetch_all_tf():
 
 
 async def analyze_gemini(tf_data: dict, dxy_price: float):
+    """✅ تم التعديل: استخدام نموذج gemini-3.5-flash الصالح"""
     try:
         prompt = GOLD_SCALP_PROMPT.format(
             data_m30=json.dumps(tf_data.get("M30", {}))[:2000],
@@ -303,24 +305,40 @@ async def analyze_gemini(tf_data: dict, dxy_price: float):
             data_m1=json.dumps(tf_data.get("M1", {}))[:2000],
             dxy_price=dxy_price,
         )
+        
+        # ✅ API endpoint صحيح لـ Gemini 3.5
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.3}
+            "generationConfig": {
+                "maxOutputTokens": 4000,
+                "temperature": 0.3,
+                "topP": 0.95,
+            }
         }
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 result = await resp.json()
                 
+                # ✅ معالجة أخطاء Gemini بشكل أفضل
                 if "error" in result:
-                    err = result["error"].get("message", "Unknown")
-                    print(f"❌ Gemini API خطأ: {err}")
-                    return f"ERROR: {err}"
+                    err = result["error"]
+                    err_msg = err.get("message", "Unknown Gemini error")
+                    err_code = err.get("code", "unknown")
+                    print(f"❌ Gemini API خطأ [{err_code}]: {err_msg}")
+                    
+                    # إذا كان النموذج غير موجود، جرب نموذج احتياطي
+                    if "not found" in err_msg.lower() or "not supported" in err_msg.lower():
+                        print("🔄 محاولة بنموذج احتياطي...")
+                        return await analyze_gemini_fallback(prompt)
+                    
+                    return f"ERROR: {err_msg}"
                 
                 if "candidates" not in result or not result["candidates"]:
                     print("❌ Gemini: لا candidates")
-                    return "ERROR: No candidates"
+                    return "ERROR: No candidates in response"
                 
                 text = result["candidates"][0]["content"]["parts"][0]["text"]
                 return text.strip()
@@ -328,6 +346,34 @@ async def analyze_gemini(tf_data: dict, dxy_price: float):
     except Exception as e:
         print(f"❌ استثناء Gemini: {e}")
         return f"ERROR: {str(e)}"
+
+
+async def analyze_gemini_fallback(prompt: str):
+    """✅ نموذج احتياطي إذا فشل النموذج الرئيسي"""
+    fallback_models = ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3-flash"]
+    
+    for model in fallback_models:
+        try:
+            print(f"🔄 تجربة نموذج احتياطي: {model}")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.3}
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    result = await resp.json()
+                    
+                    if "error" not in result and "candidates" in result:
+                        text = result["candidates"][0]["content"]["parts"][0]["text"]
+                        print(f"✅ نموذج {model} نجح!")
+                        return text.strip()
+        except Exception as e:
+            print(f"❌ نموذج {model} فشل: {e}")
+            continue
+    
+    return "ERROR: جميع النماذج فشلت"
 
 
 # ============ حساب ATR ============
@@ -792,7 +838,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("▶️ تم الاستئناف")
 
 
-# ============ الحلقات الرئيسية (محمية بالكامل) ============
+# ============ الحلقات الرئيسية (محمية) ============
 async def safe_loop(name: str, coro_func, interval: int = 60):
     """حلقة محمية - إذا تعطلت تعيد التشغيل تلقائياً"""
     while True:
@@ -812,7 +858,6 @@ async def safe_loop(name: str, coro_func, interval: int = 60):
 
 
 async def monitor_coro():
-    """مراقبة الرصيد"""
     while True:
         async with db_lock:
             if db["paused"]:
@@ -830,7 +875,6 @@ async def monitor_coro():
 
 
 async def analysis_coro():
-    """التحليل الرئيسي"""
     while True:
         async with db_lock:
             if db["paused"]:
@@ -866,7 +910,7 @@ async def analysis_coro():
             print("💵 [analysis] جلب DXY...")
             dxy_price = await fetch_dxy_price()
             
-            print("🤖 [analysis] Gemini...")
+            print(f"🤖 [analysis] Gemini ({GEMINI_MODEL})...")
             analysis_text = await analyze_gemini(tf_data, dxy_price)
             
             if analysis_text.startswith("ERROR"):
@@ -905,7 +949,6 @@ async def analysis_coro():
 
 
 async def report_coro():
-    """التقرير اليومي"""
     while True:
         now = datetime.now(timezone.utc)
         next_report = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
@@ -928,7 +971,6 @@ async def report_coro():
 
 
 async def session_coro():
-    """إشعارات الجلسات"""
     while True:
         now = datetime.now(timezone.utc)
         current_hour = now.hour
@@ -963,7 +1005,6 @@ async def session_coro():
 
 
 async def atr_coro():
-    """مراقبة ATR"""
     while True:
         async with db_lock:
             if db["paused"]:
@@ -1015,12 +1056,12 @@ async def main():
     await send_msg(
         f"🚀 <b>بوت الذهب يعمل!</b>\n\n"
         f"⏰ الجلسة: {get_session_name()}\n"
+        f"🤖 النموذج: {GEMINI_MODEL}\n"
         f"📊 تحليل كل {ANALYSIS_INTERVAL//60} دقائق\n"
         f"🎯 الحد الأدنى للثقة: {MIN_CONFIDENCE}%\n\n"
         f"استخدم /force لتحليل فوري"
     )
 
-    # تشغيل الحلقات بشكل مستقل (إذا تعطلت إحداها، الباقي يستمر!)
     tasks = [
         asyncio.create_task(safe_loop("monitor", monitor_coro, 10)),
         asyncio.create_task(safe_loop("analysis", analysis_coro, 10)),
