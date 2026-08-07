@@ -25,21 +25,21 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 # ============ الإعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY") # استبدلناه بمفتاح Twelve Data
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
 MONITOR_INTERVAL = 15
-ANALYSIS_INTERVAL = 300  # 5 دقائق
+ANALYSIS_INTERVAL = 300  # 5 دقائق بالضبط
 MIN_CONFIDENCE = 75
 GEMINI_MODEL = "gemini-1.5-flash"
 PIP_VALUE = 1.0
 
 TIMEFRAMES = {
-    "M30": ("30min", 50),
-    "M15": ("15min", 60),
-    "M5": ("5min", 100),
-    "M1": ("1min", 60),
+    "M30": "30min",
+    "M15": "15min",
+    "M5": "5min",
+    "M1": "1min",
 }
 
 # ============ الجلسات ============
@@ -58,7 +58,7 @@ db = {
     "last_analysis_ts": 0,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
-    "last_price": 2650.00,  # سعر افتراضي مبدئي
+    "last_price": 2650.00,
 }
 db_lock = asyncio.Lock()
 
@@ -144,7 +144,7 @@ def get_session_name():
     return "خارج الجلسات ⏸️"
 
 
-# ============ دوال الـ API ============
+# ============ دوال الـ API (Twelve Data) ============
 async def send_msg(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -154,45 +154,51 @@ async def send_msg(text: str):
 
 
 async def fetch_price():
-    """جلب السعر من آخر شمعة مخزنة في الذاكرة لتجنب استهلاك طلبات الـ API"""
+    """جلب السعر من الذاكرة لضمان سرعة الاستجابة وعدم استهلاك الطلبات"""
     async with db_lock:
         return db["last_price"]
 
 
-async def fetch_tf(interval: str, size: int):
-    av_interval = interval.lower()
-    url = "https://www.alphavantage.co/query"
+async def fetch_tf(interval: str):
+    """جلب بيانات الشموع من منصة Twelve Data"""
+    url = "https://api.twelvedata.com/time_series"
     params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": "XAUUSD",
-        "interval": av_interval,
-        "apikey": ALPHA_VANTAGE_API_KEY
+        "symbol": SYMBOL,
+        "interval": interval,
+        "outputsize": 60,
+        apikey: TWELVE_DATA_API_KEY
     }
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        # التصحيح لتمرير المفتاح بالشكل الصحيح في Twelve Data
+        params_td = {
+            "symbol": SYMBOL,
+            "interval": interval,
+            "outputsize": 60,
+            "apikey": TWELVE_DATA_API_KEY
+        }
+        async with session.get(url, params=params_td, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             data = await resp.json()
-            if "Information" in data or "Error Message" in data:
-                print(f"⚠️ تحذير Alpha Vantage للفريم {interval}: {json.dumps(data)}")
+            if "code" in data and data["code"] != 200:
+                print(f"⚠️ تحذير Twelve Data للفريم {interval}: {data.get('message')}")
                 return {}
-            for key in data:
-                if "Time Series" in key:
-                    candles = data[key]
-                    # تحديث السعر الحالي تلقائياً من أحدث شمعة يتم جلبها
-                    if candles:
-                        latest_time = sorted(candles.keys())[-1]
-                        price = float(candles[latest_time]["4. close"])
-                        async with db_lock:
-                            db["last_price"] = price
-                    return candles
+            
+            if "values" in data:
+                candles = data["values"]
+                if candles:
+                    # تحديث السعر الحالي من أحدث شمعة
+                    price = float(candles[0]["close"])
+                    async with db_lock:
+                        db["last_price"] = price
+                return candles
             return {}
 
 
 async def fetch_all_tf():
     result = {}
-    for label, (interval, size) in TIMEFRAMES.items():
+    for label, interval in TIMEFRAMES.items():
         try:
-            result[label] = await fetch_tf(interval, size)
-            await asyncio.sleep(2)  # مهلة أمان بين الطلبات
+            result[label] = await fetch_tf(interval)
+            await asyncio.sleep(1)  # توقف قصير بين الطلبات
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
             result[label] = {}
@@ -481,7 +487,7 @@ async def main():
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
     
-    print("🚀 البوت يعمل مع Alpha Vantage - جاهز!")
+    print("🚀 البوت يعمل مع Twelve Data - جاهز!")
     await send_msg("🚀 <b>بوت الذهب يعمل الآن بنجاح!</b>")
 
     await asyncio.gather(
