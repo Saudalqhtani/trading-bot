@@ -1,8 +1,8 @@
 """
-Gold Scalp AI Monitor v5.1 - Railway Edition (Free APIs)
+Gold Scalp AI Monitor v5.3 - Railway Edition (Twelve Data Primary)
 ========================================================================
 - أوامر Telegram تفاعلية
-- مصادر مجانية: Yahoo Finance (بدون API Key) + Alpha Vantage + Twelve Data
+- مصدر رئيسي: Twelve Data (API Key جديد)
 - إحصائيات وقاعدة بيانات في الذاكرة
 - تقرير يومي
 - تحكم كامل من الجوال
@@ -24,13 +24,12 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 # ============ الإعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")  # اختياري
-ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")  # اختياري
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-SYMBOL = "XAUUSD"
-MONITOR_INTERVAL = 60        # 1 دقيقة
-ANALYSIS_INTERVAL = 1800     # 30 دقيقة
+SYMBOL = "XAU/USD"
+MONITOR_INTERVAL = 15
+ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 75
 GEMINI_MODEL = "gemini-1.5-flash"
 PIP_VALUE = 1.0
@@ -58,6 +57,7 @@ db = {
     "last_analysis_ts": 0,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
+    "last_price": None,
 }
 db_lock = asyncio.Lock()
 
@@ -153,7 +153,7 @@ def get_session_name():
     return "خارج الجلسات ⏸️"
 
 
-# ============ API دوال - مصادر مجانية ============
+# ============ API دوال ============
 async def send_msg(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -162,155 +162,34 @@ async def send_msg(text: str):
             resp.raise_for_status()
 
 
-# ✅ المصدر الأول: Yahoo Finance (مجاني تماماً - لا يحتاج API Key)
-async def fetch_price_yahoo():
-    """جلب سعر الذهب من Yahoo Finance (مجاني)"""
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {"interval": "1m", "range": "1d"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
-            result = data["chart"]["result"][0]
-            price = result["meta"]["regularMarketPrice"]
-            return float(price)
-
-
-# ✅ المصدر الثاني: Alpha Vantage (500 طلب/يوم مجاناً)
-async def fetch_price_alpha():
-    """جلب سعر الذهب من Alpha Vantage (مجاني)"""
-    if not ALPHA_VANTAGE_API_KEY:
-        raise RuntimeError("ALPHA_VANTAGE_API_KEY not set")
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "CURRENCY_EXCHANGE_RATE",
-        "from_currency": "XAU",
-        "to_currency": "USD",
-        "apikey": ALPHA_VANTAGE_API_KEY
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
-            rate = data["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
-            return float(rate)
-
-
-# ✅ المصدر الثالث: Twelve Data (إذا كان متاحاً)
-async def fetch_price_twelve():
-    """جلب سعر الذهب من Twelve Data (إذا كان API Key متاح)"""
-    if not TWELVE_DATA_API_KEY:
-        raise RuntimeError("TWELVE_DATA_API_KEY not set")
+async def fetch_price():
+    """جلب سعر الذهب من Twelve Data"""
     url = "https://api.twelvedata.com/quote"
-    params = {"symbol": "XAU/USD", "apikey": TWELVE_DATA_API_KEY}
+    params = {"symbol": SYMBOL, "apikey": TWELVE_DATA_API_KEY}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
+            print(f"DEBUG Twelve Data response: {json.dumps(data, indent=2)}")
             if "close" in data:
-                return float(data["close"])
+                price = float(data["close"])
             elif "price" in data:
-                return float(data["price"])
+                price = float(data["price"])
             else:
                 raise RuntimeError(f"Unexpected response: {json.dumps(data)}")
-
-
-# ✅ دالة موحدة: تجرب المصادر بالترتيب
-async def fetch_price():
-    """تجربة المصادر بالترتيب: Yahoo → Alpha Vantage → Twelve Data"""
-    errors = []
-    
-    # محاولة 1: Yahoo Finance (مجاني)
-    try:
-        price = await fetch_price_yahoo()
-        print(f"✅ Yahoo Finance: {price}")
-        return price
-    except Exception as e:
-        errors.append(f"Yahoo: {e}")
-        print(f"⚠️ Yahoo failed: {e}")
-    
-    # محاولة 2: Alpha Vantage (مجاني)
-    try:
-        price = await fetch_price_alpha()
-        print(f"✅ Alpha Vantage: {price}")
-        return price
-    except Exception as e:
-        errors.append(f"Alpha: {e}")
-        print(f"⚠️ Alpha Vantage failed: {e}")
-    
-    # محاولة 3: Twelve Data (إذا متاح)
-    try:
-        price = await fetch_price_twelve()
-        print(f"✅ Twelve Data: {price}")
-        return price
-    except Exception as e:
-        errors.append(f"Twelve: {e}")
-        print(f"⚠️ Twelve Data failed: {e}")
-    
-    raise RuntimeError(f"All price sources failed: {errors}")
-
-
-# ✅ جلب الشموع من Yahoo Finance (مجاني)
-async def fetch_tf_yahoo(interval: str, size: int):
-    """جلب بيانات الشموع من Yahoo Finance"""
-    yahoo_intervals = {
-        "1min": "1m",
-        "5min": "5m",
-        "15min": "15m",
-        "30min": "30m",
-    }
-    yahoo_interval = yahoo_intervals.get(interval, "15m")
-    
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {
-        "interval": yahoo_interval,
-        "range": "5d"
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            data = await resp.json()
-            result = data["chart"]["result"][0]
-            timestamps = result["timestamp"]
-            ohlc = result["indicators"]["quote"][0]
             
-            candles = []
-            for i in range(len(timestamps)):
-                candles.append({
-                    "datetime": datetime.fromtimestamp(timestamps[i], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                    "open": str(ohlc["open"][i]) if ohlc["open"][i] else str(ohlc["close"][i]),
-                    "high": str(ohlc["high"][i]) if ohlc["high"][i] else str(ohlc["close"][i]),
-                    "low": str(ohlc["low"][i]) if ohlc["low"][i] else str(ohlc["close"][i]),
-                    "close": str(ohlc["close"][i]),
-                    "volume": str(ohlc["volume"][i]) if ohlc["volume"][i] else "0"
-                })
-            
-            return candles[-size:]
+            async with db_lock:
+                db["last_price"] = price
+            return price
 
 
-# ✅ جلب الشموع من Twelve Data (إذا متاح)
-async def fetch_tf_twelve(interval: str, size: int):
-    if not TWELVE_DATA_API_KEY:
-        raise RuntimeError("TWELVE_DATA_API_KEY not set")
+async def fetch_tf(interval: str, size: int):
+    """جلب بيانات الشموع من Twelve Data"""
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": "XAU/USD", "interval": interval, "outputsize": size, "apikey": TWELVE_DATA_API_KEY}
+    params = {"symbol": SYMBOL, "interval": interval, "outputsize": size, "apikey": TWELVE_DATA_API_KEY}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             data = await resp.json()
             return data["values"]
-
-
-# ✅ دالة موحدة للشموع
-async def fetch_tf(interval: str, size: int):
-    """تجربة مصادر الشموع: Yahoo → Twelve Data"""
-    try:
-        return await fetch_tf_yahoo(interval, size)
-    except Exception as e:
-        print(f"⚠️ Yahoo candles failed: {e}")
-    
-    try:
-        return await fetch_tf_twelve(interval, size)
-    except Exception as e:
-        print(f"⚠️ Twelve candles failed: {e}")
-    
-    raise RuntimeError(f"All candle sources failed for {interval}")
 
 
 async def fetch_all_tf():
@@ -318,7 +197,7 @@ async def fetch_all_tf():
     for label, (interval, size) in TIMEFRAMES.items():
         try:
             result[label] = await fetch_tf(interval, size)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
             result[label] = []
@@ -460,7 +339,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         price = await fetch_price()
-        msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD\n\n✅ المصدر: Yahoo Finance (مجاني)"
+        msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD"
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
@@ -571,7 +450,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • الثقة المطلوبة: 75%+
 • أنت تنفذ الصفقات يدوياً على XM
 • البوت يتوقف تلقائياً قبل الأخبار العاجلة
-• ✅ الآن يستخدم Yahoo Finance (مجاني) كمصدر رئيسي
     """
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -608,7 +486,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "price":
         try:
             price = await fetch_price()
-            msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD\n\n✅ المصدر: Yahoo Finance (مجاني)"
+            msg = f"💵 <b>سعر الذهب</b>\n\nXAU/USD: <code>{price:,.2f}</code> USD"
             await query.message.reply_text(msg, parse_mode="HTML")
         except Exception as e:
             await query.message.reply_text(f"❌ خطأ: {e}")
@@ -877,7 +755,8 @@ async def main():
     
     print("🚀 البوت يعمل مع Polling - جاهز لاستقبال الأوامر!")
 
-    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\n✅ <b>تحديث مهم:</b>\nالآن يستخدم Yahoo Finance (مجاني) كمصدر رئيسي للأسعار!\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
+    # ✅ رسالة بدء التشغيل - نظيفة بدون ذكر مصادر API
+    await send_msg("🚀 <b>بوت الذهب يعمل الآن!</b>\n\nالأوامر المتاحة:\n/status - الحالة\n/price - السعر\n/signal - الإشارة\n/stats - الإحصائيات\n/risk - نسبة المخاطرة\n/pause - إيقاف\n/resume - استئناف\n/help - المساعدة\n\n⚠️ البوت يتوقف تلقائياً قبل الأخبار العاجلة")
 
     await asyncio.gather(
         monitor_loop(),
@@ -888,4 +767,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
