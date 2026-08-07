@@ -11,6 +11,7 @@ Gold Scalp AI Monitor v5.3 - Railway Edition (Twelve Data Primary)
 - إشعار قبل الأخبار العاجلة
 """
 
+
 import os
 import json
 import asyncio
@@ -29,7 +30,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
 MONITOR_INTERVAL = 15
-ANALYSIS_INTERVAL = 180
+ANALYSIS_INTERVAL = 300  # 300 ثانية = 5 دقائق بالضبط حسب طلبك
 MIN_CONFIDENCE = 75
 GEMINI_MODEL = "gemini-1.5-flash"
 PIP_VALUE = 1.0
@@ -171,6 +172,9 @@ async def fetch_price():
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
             
+            if "Information" in data or "Error Message" in data:
+                raise RuntimeError(f"Alpha Vantage Limit: {json.dumps(data)}")
+                
             time_series_key = None
             for key in data:
                 if "Time Series" in key:
@@ -202,6 +206,9 @@ async def fetch_tf(interval: str, size: int):
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             data = await resp.json()
+            if "Information" in data or "Error Message" in data:
+                print(f"⚠️ تحذير Alpha Vantage للفريم {interval}: {json.dumps(data)}")
+                return {}
             for key in data:
                 if "Time Series" in key:
                     return data[key]
@@ -213,7 +220,7 @@ async def fetch_all_tf():
     for label, (interval, size) in TIMEFRAMES.items():
         try:
             result[label] = await fetch_tf(interval, size)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)  # مهلة أمان بين طلبات الفريمات لتجنب ضغط الـ API
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
             result[label] = {}
