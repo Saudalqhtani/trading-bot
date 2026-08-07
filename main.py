@@ -30,7 +30,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
 MONITOR_INTERVAL = 15
-ANALYSIS_INTERVAL = 300  # 300 ثانية = 5 دقائق بالضبط حسب طلبك
+ANALYSIS_INTERVAL = 300  # 5 دقائق
 MIN_CONFIDENCE = 75
 GEMINI_MODEL = "gemini-1.5-flash"
 PIP_VALUE = 1.0
@@ -58,11 +58,11 @@ db = {
     "last_analysis_ts": 0,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
-    "last_price": None,
+    "last_price": 2650.00,  # سعر افتراضي مبدئي
 }
 db_lock = asyncio.Lock()
 
-# ============ البرومبت (حسب طلبك السابق بنص عادي Plain Text) ============
+# ============ البرومبت (Plain Text) ============
 GOLD_SCALP_PROMPT = """
 أنت رئيس المحللين الفنيين ومدير المخاطر في صندوق استثماري عالمي (Elite Financial Analyst). مهمتك هي قيادة "شبكة من 12 وكيلاً ذكياً ومخصصاً" لتحليل بيانات الشموع الفعلية المرفقة لأربع فريمات زمنية (M30, M15, M5, M1)، وإصدار قرار تداول حاسم وخالي تماماً من العموميات بناءً على مفهوم الإجماع (Consensus System).
 
@@ -86,24 +86,18 @@ GOLD_SCALP_PROMPT = """
 ---
 
 ### [تفصيل شبكة الوكلاء الـ 12]:
-1. Trend Agent: الاتجاه العام على M30 و M15 مقارنة بـ EMA 200 (احسبه فعليًا من بيانات M30/M15 المرفقة).
+1. Trend Agent: الاتجاه العام على M30 و M15 مقارنة بـ EMA 200.
 2. Session & Time Liquidity Agent: سحب السيولة الزمانية وتأكيد التداول داخل London/NY Kill Zones.
 3. Order Block Agent: مناطق العرض/الطلب المؤسساتية غير المُعاد اختبارها على M15/M5.
 4. FVG / Imbalance Agent: الفجوات السعرية غير المغطاة على M15 و M5.
 5. Execution Trigger Agent: كسر هيكلية حقيقي (CHoCH) على M5/M1 فعليًا من البيانات المرفقة.
 6. Candlestick Pattern Agent: شموع الارتداد والزخم المؤسساتي على M5.
-7. Multi-Timeframe Alignment Agent: توافق [M30/M15 Macro] ➔ [M5 Structure] ➔ [M1 Trigger] - استخدم البيانات الفعلية الأربعة، لا تفترض.
+7. Multi-Timeframe Alignment Agent: توافق [M30/M15 Macro] ➔ [M5 Structure] ➔ [M1 Trigger].
 8. Volume & Momentum Agent: اندفاع الحجم والزخم من بيانات M5/M1.
-9. DXY & Correlation Agent: مؤشرات الزخم (RSI/Stochastic RSI) المحسوبة من M15/M5 المرفقة.
+9. DXY & Correlation Agent: مؤشرات الزخم المحسوبة من M15/M5 المرفقة.
 10. Sentiment Agent: مناطق تجمعات الـ Stop Loss المحتملة.
 11. News & Macro Filter Agent: حظر الدخول قبل/بعد أخبار عالية التأثير بـ 20 دقيقة.
-12. Dynamic Risk Guard Agent: لا يوجد سقف رقمي ثابت لعدد النقاط. ضع SL خلف أقرب نقطة هيكلية حقيقية (Swing High/Low محمي أو حدود منطقة Order Block) - المسافة تتحدد حسب تذبذب السوق الفعلي وقت التحليل، صغيرة كانت أو كبيرة، المهم أن تكون المنطقة آمنة فعليًا وليست عشوائية. TP1 و TP2 يوضعان عند أقرب مناطق سيولة/مقاومة أو دعم فعلية على الشارت (مو رقم ثابت مسبقًا). يجب أن تبقى نسبة العائد للمخاطرة (R:R) لا تقل عن 1:2 كحد أدنى مهما كانت المسافات.
-
-### [طريقة القرار]:
-- 12 وكيل يصوتون BUY/SELL/HOLD بناءً على البيانات الفعلية المرفقة فقط، بدون افتراضات.
-- الوكلاء 5، 7، 11، 12 لا يصوتون BUY/SELL إلا بعد استيفاء شرط أن يكون SL خلف نقطة هيكلية حقيقية (مو عشوائي) وتوافق الفريمات الأربعة فعليًا و R:R لا يقل عن 1:2.
-- إجماع 9+ أصوات: (9/12=75-80%)، (10/12=81-89%)، (11-12/12=90%+).
-- أقل من 9 أصوات أو كان الـ SL بمكان غير هيكلي (عشوائي) أو R:R أقل من 1:2 = HOLD.
+12. Dynamic Risk Guard Agent: لا يوجد سقف رقمي ثابت لعدد النقاط. ضع SL خلف أقرب نقطة هيكلية حقيقية، مع نسبة ريسك لا تقل عن 1:2.
 
 ### [صيغة المخرج]: أعطني النتيجة حصرياً على شكل نص عادي (Plain Text) مرتب بأسطر وخطوط واضحة، وبدون استخدام أقواس JSON أو رموز برمجة خاصة:
 القرار النهائي: [BUY / SELL / HOLD]
@@ -150,7 +144,7 @@ def get_session_name():
     return "خارج الجلسات ⏸️"
 
 
-# ============ API دوال (محدثة لـ Alpha Vantage) ============
+# ============ دوال الـ API ============
 async def send_msg(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -160,41 +154,12 @@ async def send_msg(text: str):
 
 
 async def fetch_price():
-    """جلب سعر الذهب الفوري من أحدث شمعة في Alpha Vantage"""
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": "XAUUSD",
-        "interval": "1min",
-        "apikey": ALPHA_VANTAGE_API_KEY
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
-            
-            if "Information" in data or "Error Message" in data:
-                raise RuntimeError(f"Alpha Vantage Limit: {json.dumps(data)}")
-                
-            time_series_key = None
-            for key in data:
-                if "Time Series" in key:
-                    time_series_key = key
-                    break
-            
-            if time_series_key and time_series_key in data:
-                candles = data[time_series_key]
-                latest_time = sorted(candles.keys())[-1]
-                price = float(candles[latest_time]["4. close"])
-            else:
-                raise RuntimeError(f"Unexpected Alpha Vantage response: {json.dumps(data)}")
-            
-            async with db_lock:
-                db["last_price"] = price
-            return price
+    """جلب السعر من آخر شمعة مخزنة في الذاكرة لتجنب استهلاك طلبات الـ API"""
+    async with db_lock:
+        return db["last_price"]
 
 
 async def fetch_tf(interval: str, size: int):
-    """جلب بيانات الشموع من Alpha Vantage"""
     av_interval = interval.lower()
     url = "https://www.alphavantage.co/query"
     params = {
@@ -211,7 +176,14 @@ async def fetch_tf(interval: str, size: int):
                 return {}
             for key in data:
                 if "Time Series" in key:
-                    return data[key]
+                    candles = data[key]
+                    # تحديث السعر الحالي تلقائياً من أحدث شمعة يتم جلبها
+                    if candles:
+                        latest_time = sorted(candles.keys())[-1]
+                        price = float(candles[latest_time]["4. close"])
+                        async with db_lock:
+                            db["last_price"] = price
+                    return candles
             return {}
 
 
@@ -220,7 +192,7 @@ async def fetch_all_tf():
     for label, (interval, size) in TIMEFRAMES.items():
         try:
             result[label] = await fetch_tf(interval, size)
-            await asyncio.sleep(2)  # مهلة أمان بين طلبات الفريمات لتجنب ضغط الـ API
+            await asyncio.sleep(2)  # مهلة أمان بين الطلبات
         except Exception as e:
             print(f"❌ فشل جلب {label}: {e}")
             result[label] = {}
@@ -243,7 +215,7 @@ async def analyze_gemini(tf_data: dict):
             return text.strip()
 
 
-# ============ أخبار الفوركس ============
+# ============ الأخبار ============
 async def fetch_forex_news():
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
     async with aiohttp.ClientSession() as session:
@@ -276,22 +248,12 @@ async def check_news_and_block():
                 block_until = now + (news['minutes_until'] + 30) * 60
                 async with db_lock:
                     db["news_blocked_until"] = block_until
-                msg = f"""
-⚠️ <b>تنبيه: خبر اقتصادي هام!</b>
-الخبر: {news['title']}
-التأثير: عالي 🔴
-الوقت: {news['time'].strftime('%H:%M')} UTC
-⏸️ تم إيقاف التحليل مؤقتاً
-                """
-                await send_msg(msg)
                 return True
         async with db_lock:
             if db["news_blocked_until"] > 0 and now > db["news_blocked_until"]:
                 db["news_blocked_until"] = 0
-                await send_msg("✅ <b>انتهى تأثير الخبر</b>\n\nجاري استئناف التحليل...")
         return False
     except Exception as e:
-        print(f"  ⚠️ خطأ بجلب الأخبار: {e}")
         return False
 
 
@@ -417,7 +379,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
-# ============ معالج الأزرار ============
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -439,16 +400,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("▶️ تم الاستئناف")
 
 
-# ============ التقرير اليومي ============
-async def daily_report():
-    async with db_lock:
-        stats = db["stats"]
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        risk = db["risk_percent"]
-    msg = f"📅 <b>التقرير اليومي</b>\nالربح النقاط: {stats['total_pips']:+.1f}\nالمخاطرة: {risk}%"
-    await send_msg(msg)
-
-
 # ============ الحلقات الرئيسية ============
 async def monitor_loop():
     while True:
@@ -457,14 +408,8 @@ async def monitor_loop():
                 if db["paused"]:
                     await asyncio.sleep(MONITOR_INTERVAL)
                     continue
-                trade = db["active_trade"]
-
-            if trade:
-                price = await fetch_price()
-                # منطق مراقبة الصفقة
             await asyncio.sleep(MONITOR_INTERVAL)
         except Exception as e:
-            print(f"❌ خطأ مراقبة: {e}")
             await asyncio.sleep(MONITOR_INTERVAL)
 
 
@@ -497,8 +442,15 @@ async def analysis_loop():
 
             await asyncio.sleep(5)
         except Exception as e:
-            print(f"❌ خطأ تحليل: {e}")
             await asyncio.sleep(5)
+
+
+async def daily_report():
+    async with db_lock:
+        stats = db["stats"]
+        risk = db["risk_percent"]
+    msg = f"📅 <b>التقرير اليومي</b>\nالربح النقاط: {stats['total_pips']:+.1f}\nالمخاطرة: {risk}%"
+    await send_msg(msg)
 
 
 async def report_loop():
@@ -541,3 +493,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
