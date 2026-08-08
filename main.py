@@ -28,13 +28,15 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # نموذج التأكيد المجاني
 
 SYMBOL = "XAU/USD"
 DXY_SYMBOL = "DXY"  # محاولة أولى، إذا فشلت نستخدم "DX-Y.NYB" أو "USDX"
 MONITOR_INTERVAL = 15
 ANALYSIS_INTERVAL = 180
-MIN_CONFIDENCE = 70
+MIN_CONFIDENCE = 75  # الحد الأدنى للإشارة (تم رفعه من 70 إلى 75)
 GEMINI_MODEL = "gemini-3.5-flash"
+GROQ_MODEL = "llama-3.3-70b-versatile"  # نموذج التأكيد - سريع ومجاني
 PIP_VALUE = 1.0
 
 # اعدادات مراقبة الصفقات
@@ -535,6 +537,133 @@ async def analyze_gemini_fallback(prompt: str):
     return "ERROR: جميع النماذج فشلت"
 
 
+# ============ نموذج التأكيد - Groq (مجاني) ============
+async def analyze_groq(tf_data: dict, dxy_price: float):
+    """نموذج تأكيد مجاني باستخدام Groq API - Llama 3.3 70B"""
+    try:
+        prompt = GOLD_SCALP_PROMPT.format(
+            data_m30=json.dumps(tf_data.get("M30", {}))[:2000],
+            data_m15=json.dumps(tf_data.get("M15", {}))[:2000],
+            data_m5=json.dumps(tf_data.get("M5", {}))[:2000],
+            data_m1=json.dumps(tf_data.get("M1", {}))[:2000],
+            dxy_price=dxy_price,
+        )
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": "أنت محلل فني خبير في تداول الذهب (XAU/USD). أعطِ قراراً واضحاً: BUY أو SELL أو HOLD."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.2,
+            "top_p": 0.9
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                result = await resp.json()
+
+                if "error" in result:
+                    err_msg = result["error"].get("message", "Unknown Groq error")
+                    print(f"❌ Groq API خطأ: {err_msg}")
+                    return f"ERROR: {err_msg}"
+
+                if "choices" not in result or not result["choices"]:
+                    print("❌ Groq: لا choices")
+                    return "ERROR: No choices in response"
+
+                text = result["choices"][0]["message"]["content"]
+                print(f"✅ Groq تحليل ناجح!")
+                return text.strip()
+
+    except Exception as e:
+        print(f"❌ استثناء Groq: {e}")
+        return f"ERROR: {str(e)}"
+
+
+async def consensus_analysis(tf_data: dict, dxy_price: float):
+    """نظام الإجماع: Gemini + Groq → قرار نهائي"""
+    print("🔄 [consensus] بدء تحليل الإجماع...")
+
+    # تحليل Gemini
+    gemini_text = await analyze_gemini(tf_data, dxy_price)
+    if gemini_text.startswith("ERROR"):
+        print(f"⚠️ [consensus] Gemini فشل، استخدام Gemini فقط")
+        return gemini_text, "GEMINI_ONLY", 0
+
+    gemini_decision, gemini_confidence = parse_signal_decision(gemini_text)
+    print(f"🤖 [consensus] Gemini: {gemini_decision} (ثقة {gemini_confidence}%)")
+
+    # تحليل Groq (التأكيد)
+    groq_text = await analyze_groq(tf_data, dxy_price)
+    if groq_text.startswith("ERROR"):
+        print(f"⚠️ [consensus] Groq فشل، استخدام Gemini فقط")
+        return gemini_text, "GEMINI_ONLY", 0
+
+    groq_decision, groq_confidence = parse_signal_decision(groq_text)
+    print(f"🦙 [consensus] Groq: {groq_decision} (ثقة {groq_confidence}%)")
+
+    # منطق الإجماع
+    if gemini_decision == groq_decision and gemini_decision in ["BUY", "SELL"]:
+        # اتفاق! رفع الثقة
+        consensus_confidence = min(95, max(gemini_confidence, groq_confidence) + 10)
+        print(f"✅ [consensus] إجماع على {gemini_decision}! ثقة مرتفعة: {consensus_confidence}%")
+
+        # دمج التحليلين
+        merged_text = f"""🤖 تحليل Gemini: {gemini_decision} (ثقة {gemini_confidence}%)
+🦙 تحليل Groq: {groq_decision} (ثقة {groq_confidence}%)
+✅ <b>الإجماع: {gemini_decision} (ثقة {consensus_confidence}%)</b>
+
+--- تحليل Gemini ---
+{gemini_text}
+
+--- تحليل Groq ---
+{groq_text}"""
+        return merged_text, "CONSENSUS", consensus_confidence
+
+    elif gemini_decision in ["BUY", "SELL"] and groq_decision == "HOLD":
+        # Gemini يرى فرصة لكن Groq متردد
+        print(f"⚠️ [consensus] Gemini: {gemini_decision} | Groq: HOLD → تخفيض الثقة")
+        reduced_confidence = max(55, gemini_confidence - 10)  # خصم أقل للإجماع الضعيف
+        merged_text = f"""🤖 تحليل Gemini: {gemini_decision} (ثقة {gemini_confidence}%)
+🦙 تحليل Groq: HOLD (متردد)
+⚠️ <b>الإجماع: {gemini_decision} (ثقة مخفضة: {reduced_confidence}%)</b>
+
+--- تحليل Gemini ---
+{gemini_text}
+
+--- تحليل Groq ---
+{groq_text}"""
+        return merged_text, "WEAK_CONSENSUS", reduced_confidence
+
+    elif gemini_decision != groq_decision and gemini_decision in ["BUY", "SELL"] and groq_decision in ["BUY", "SELL"]:
+        # خلاف! Gemini BUY vs Groq SELL أو العكس
+        print(f"❌ [consensus] خلاف! Gemini: {gemini_decision} vs Groq: {groq_decision} → HOLD")
+        merged_text = f"""🤖 تحليل Gemini: {gemini_decision} (ثقة {gemini_confidence}%)
+🦙 تحليل Groq: {groq_decision} (ثقة {groq_confidence}%)
+❌ <b>خلاف! القرار: HOLD</b>
+
+النماذج لا تتفق. انتظر فرصة أوضح.
+
+--- تحليل Gemini ---
+{gemini_text}
+
+--- تحليل Groq ---
+{groq_text}"""
+        return merged_text, "DISAGREEMENT", 0
+
+    else:
+        # الحالات الأخرى
+        print(f"⏸️ [consensus] لا إجماع واضح → HOLD")
+        return gemini_text, "NO_CONSENSUS", gemini_confidence
+
+
 async def calculate_atr(candles: list, period: int = 14):
     if len(candles) < period + 1:
         return 0.0
@@ -819,6 +948,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📡 مراقبة ذكية للصفقات\n"
         "• 🧠 تقليل استخدام Gemini\n"
         "• 📊 تحديثات فقط عند التغيرات المهمة\n"
+        "• ✅ نظام الإجماع: Gemini + Groq (مجاني)\n"
         "• ✅ اصلاح: الازرار، DXY، حفظ الصفقات، عطلة الاسبوع، الرسم\n\n"
         "اختر خياراً:",
         parse_mode="HTML", reply_markup=reply
@@ -984,11 +1114,25 @@ async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if missing:
             await update.message.reply_text(f"⚠️ بيانات ناقصة: {', '.join(missing)}")
             return
-        analysis_text = await analyze_gemini(tf_data, dxy_price)
+        # استخدام نظام الإجماع: Gemini + Groq
+        analysis_text, consensus_status, consensus_confidence = await consensus_analysis(tf_data, dxy_price)
+
         if analysis_text.startswith("ERROR"):
             await update.message.reply_text(f"❌ <b>خطأ:</b>\n{analysis_text}")
             return
-        decision, confidence = parse_signal_decision(analysis_text)
+
+        decision, _ = parse_signal_decision(analysis_text)
+
+        # تعديل الثقة بناءً على الإجماع
+        if consensus_status == "CONSENSUS":
+            confidence = consensus_confidence
+        elif consensus_status == "WEAK_CONSENSUS":
+            confidence = consensus_confidence
+        elif consensus_status == "DISAGREEMENT":
+            decision = "HOLD"
+            confidence = 0
+        else:
+            decision, confidence = parse_signal_decision(analysis_text)
         async with db_lock:
             db["analysis_count"] += 1
             db["signals"].append({"text": analysis_text, "time": now_str(), "forced": True})
@@ -1361,12 +1505,55 @@ async def opportunity_analyzer_coro():
                     print(f"⚠️ [opportunity] بيانات ناقصة: {missing}")
                     await asyncio.sleep(30)
                     continue
-                analysis_text = await analyze_gemini(tf_data, current_dxy)
+                # استخدام نظام الإجماع: Gemini + Groq
+                analysis_text, consensus_status, consensus_confidence = await consensus_analysis(tf_data, current_dxy)
+
                 if analysis_text.startswith("ERROR"):
-                    print(f"❌ [opportunity] Gemini خطأ: {analysis_text}")
+                    print(f"❌ [opportunity] خطأ في التحليل: {analysis_text}")
                     await asyncio.sleep(60)
                     continue
-                decision, confidence = parse_signal_decision(analysis_text)
+
+                # استخدام قرار الإجماع
+                decision, _ = parse_signal_decision(analysis_text)
+
+                # تعديل الثقة بناءً على الإجماع
+                if consensus_status == "CONSENSUS":
+                    confidence = consensus_confidence
+                    print(f"✅ [opportunity] إجماع كامل! ثقة: {confidence}%")
+                elif consensus_status == "WEAK_CONSENSUS":
+                    confidence = consensus_confidence
+                    print(f"⚠️ [opportunity] إجماع ضعيف! ثقة: {confidence}%")
+                    if confidence < MIN_CONFIDENCE:
+                        print(f"⏸️ [opportunity] ثقة منخفضة ({confidence}% < {MIN_CONFIDENCE}%) → لا إشارة")
+                        await send_msg(
+                            f"⚠️ <b>إجماع ضعيف - لا إشارة</b>
+"
+                            f"القرار: {decision}
+"
+                            f"الثقة: {confidence}% (الحد: {MIN_CONFIDENCE}%)
+"
+                            f"🦙 Groq متردد → انتظر فرصة أوضح"
+                        )
+                elif consensus_status == "DISAGREEMENT":
+                    decision = "HOLD"
+                    confidence = 0
+                    print(f"❌ [opportunity] خلاف! تحويل إلى HOLD")
+                    await send_msg(
+                        f"❌ <b>خلاف بين النماذج - لا إشارة</b>
+
+"
+                        f"🤖 Gemini يرى: {gemini_decision}
+"
+                        f"🦙 Groq يرى: {groq_decision}
+
+"
+                        f"⏸️ القرار: HOLD (انتظر توافق)
+"
+                        f"💡 النماذج لا تتفق → لا دخول"
+                    )
+                else:
+                    decision, confidence = parse_signal_decision(analysis_text)
+                    print(f"⏸️ [opportunity] بدون إجماع: {decision} (ثقة {confidence}%)")
                 trade_details = parse_trade_details(analysis_text)
                 async with db_lock:
                     db["last_analysis_ts"] = time.time()
@@ -1589,7 +1776,9 @@ async def main():
     await send_msg(
         f"🚀 <b>بوت الذهب يعمل! v6.1</b>\n\n"
         f"⏰ الجلسة: {get_session_name()}\n"
-        f"🤖 النموذج: {GEMINI_MODEL}\n"
+        f"🤖 النموذج الرئيسي: {GEMINI_MODEL}\n"
+        f"🦙 نموذج التأكيد: {GROQ_MODEL} (مجاني)\n"
+        f"✅ نظام الإجماع: Gemini + Groq\n"
         f"📡 مراقبة ذكية للصفقات\n"
         f"🔔 اشعارات اخبار قبل 30 دقيقة\n"
         f"🧠 تقليل استخدام Gemini\n"
@@ -1612,3 +1801,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
