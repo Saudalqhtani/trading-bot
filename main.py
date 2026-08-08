@@ -30,11 +30,11 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SYMBOL = "XAU/USD"
-DXY_SYMBOL = "DXY"
+DXY_SYMBOL = "DXY"  # محاولة أولى، إذا فشلت نستخدم "DX-Y.NYB" أو "USDX"
 MONITOR_INTERVAL = 15
 ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 70
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 PIP_VALUE = 1.0
 
 # اعدادات مراقبة الصفقات
@@ -337,12 +337,130 @@ async def fetch_price():
 
 
 async def fetch_dxy_price():
-    """اصلاح 2: جلب سعر DXY من API"""
-    data = await fetch_tf("1min", DXY_SYMBOL)
-    if data and "values" in data and data["values"]:
-        return float(data["values"][0]["close"])
-    async with db_lock:
-        return db["dxy_price"]
+    """اصلاح 2: جلب سعر DXY من API باستخدام endpoint /quote"""
+    try:
+        # Twelve Data يستخدم /quote للمؤشرات (Indices) وليس /time_series
+        url = "https://api.twelvedata.com/quote"
+        params = {"symbol": DXY_SYMBOL, "apikey": TWELVE_DATA_API_KEY}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                if "code" in data and data["code"] != 200:
+                    print(f"⚠️ Twelve Data /quote خطأ DXY: {data.get('message', 'unknown')}")
+                    # محاولة endpoint /price كبديل
+                    price = await fetch_dxy_price_fallback()
+                    if price == db["dxy_price"]:  # إذا فشل fallback أيضاً
+                        manual = await calculate_dxy_manual()
+                        if manual:
+                            return manual
+                    return price
+                if "close" in data:
+                    price = float(data["close"])
+                    async with db_lock:
+                        db["dxy_price"] = price
+                    return price
+                elif "price" in data:
+                    price = float(data["price"])
+                    async with db_lock:
+                        db["dxy_price"] = price
+                    return price
+                else:
+                    print(f"⚠️ Twelve Data /quote: لا بيانات DXY - {data.keys()}")
+                    price = await fetch_dxy_price_fallback()
+                    if price == db["dxy_price"]:
+                        manual = await calculate_dxy_manual()
+                        if manual:
+                            return manual
+                    return price
+    except Exception as e:
+        print(f"❌ استثناء fetch_dxy_price /quote: {e}")
+        price = await fetch_dxy_price_fallback()
+        if price == db["dxy_price"]:
+            manual = await calculate_dxy_manual()
+            if manual:
+                return manual
+        return price
+
+
+async def fetch_dxy_price_fallback():
+    """بديل: استخدام endpoint /price"""
+    try:
+        url = "https://api.twelvedata.com/price"
+        params = {"symbol": DXY_SYMBOL, "apikey": TWELVE_DATA_API_KEY}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                if "price" in data:
+                    price = float(data["price"])
+                    async with db_lock:
+                        db["dxy_price"] = price
+                    return price
+                else:
+                    print(f"⚠️ Twelve Data /price: لا بيانات DXY")
+                    async with db_lock:
+                        return db["dxy_price"]
+    except Exception as e:
+        print(f"❌ استثناء fetch_dxy_price_fallback: {e}")
+        async with db_lock:
+            return db["dxy_price"]
+
+async def calculate_dxy_manual():
+    """حساب DXY يدوياً من أزواج الفوركس (الحل النهائي المضمون)
+
+    صيغة DXY:
+    DXY = 50.14348112 × EURUSD^-0.576 × USDJPY^0.136 × GBPUSD^-0.119 × USDCAD^0.091 × USDSEK^0.042 × USDCHF^0.036
+    """
+    try:
+        pairs = {
+            "EUR/USD": -0.576,
+            "USD/JPY": 0.136,
+            "GBP/USD": -0.119,
+            "USD/CAD": 0.091,
+            "USD/SEK": 0.042,
+            "USD/CHF": 0.036,
+        }
+
+        rates = {}
+        async with aiohttp.ClientSession() as session:
+            for pair, weight in pairs.items():
+                try:
+                    url = "https://api.twelvedata.com/price"
+                    params = {"symbol": pair, "apikey": TWELVE_DATA_API_KEY}
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        data = await resp.json()
+                        if "price" in data:
+                            rates[pair] = float(data["price"])
+                        else:
+                            print(f"⚠️ لا بيانات لـ {pair}")
+                            return None
+                except Exception as e:
+                    print(f"⚠️ خطأ في جلب {pair}: {e}")
+                    return None
+                await asyncio.sleep(0.3)  # rate limiting
+
+        if len(rates) != 6:
+            print(f"⚠️ بيانات ناقصة: {len(rates)}/6 أزواج")
+            return None
+
+        # حساب DXY
+        dxy = 50.14348112
+        dxy *= (rates["EUR/USD"] ** pairs["EUR/USD"])
+        dxy *= (rates["USD/JPY"] ** pairs["USD/JPY"])
+        dxy *= (rates["GBP/USD"] ** pairs["GBP/USD"])
+        dxy *= (rates["USD/CAD"] ** pairs["USD/CAD"])
+        dxy *= (rates["USD/SEK"] ** pairs["USD/SEK"])
+        dxy *= (rates["USD/CHF"] ** pairs["USD/CHF"])
+
+        price = round(dxy, 2)
+        async with db_lock:
+            db["dxy_price"] = price
+        print(f"✅ DXY المحسوب يدوياً: {price}")
+        return price
+
+    except Exception as e:
+        print(f"❌ خطأ حساب DXY يدوياً: {e}")
+        return None
+
 
 
 async def fetch_all_tf():
@@ -847,6 +965,17 @@ async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # اصلاح: التحقق من عطلة نهاية الاسبوع اولاً
+    if is_weekend():
+        await update.message.reply_text(
+            "🛑 <b>عطلة نهاية الاسبوع!</b>\n\n"
+            "⏸️ السوق مغلق اليوم (السبت/الاحد)\n"
+            "📅 سيتم استئناف التحليل يوم الاثنين\n"
+            "🕐 الجلسة الاولى: لندن 07:00 UTC",
+            parse_mode="HTML"
+        )
+        return
+
     await update.message.reply_text("🔄 <b>جاري التحليل الفوري...</b>", parse_mode="HTML")
     try:
         tf_data = await fetch_all_tf()
@@ -974,6 +1103,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db["last_button_press"] = time.time()
 
     await query.answer()
+
+    # اصلاح: التحقق من عطلة نهاية الاسبوع للازرار المتعلقة بالتحليل
+    if query.data == "force_analysis" and is_weekend():
+        await query.answer()
+        await query.message.reply_text(
+            "🛑 <b>عطلة نهاية الاسبوع!</b>\n\n"
+            "⏸️ السوق مغلق اليوم (السبت/الاحد)\n"
+            "📅 سيتم استئناف التحليل يوم الاثنين\n"
+            "🕐 الجلسة الاولى: لندن 07:00 UTC",
+            parse_mode="HTML"
+        )
+        return
 
     handlers = {
         "status": cmd_status, "price": cmd_price, "signal": cmd_signal,
