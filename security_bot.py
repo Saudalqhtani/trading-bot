@@ -146,49 +146,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         text = (
-            "بوت ادارة الامان v2.0" + "
-
-" +
-            f"مرحبا المشرف {user.first_name}!" + "
-" +
-            f"معرفك: {user_id}" + "
-
-" +
+            "بوت ادارة الامان v2.0" + "\n\n" +
+            f"مرحبا المشرف {user.first_name}!" + "\n" +
+            f"معرفك: {user_id}" + "\n\n" +
             "اختر خيارا من الازرار:"
         )
         await update.message.reply_text(text, reply_markup=reply_markup)
     else:
         text = (
-            "بوت ادارة الامان" + "
-
-" +
-            f"مرحبا {user.first_name}!" + "
-" +
-            f"معرفك: {user_id}" + "
-
-" +
-            "الاوامر:" + "
-" +
-            "/id - عرض معرفك" + "
-" +
+            "بوت ادارة الامان" + "\n\n" +
+            f"مرحبا {user.first_name}!" + "\n" +
+            f"معرفك: {user_id}" + "\n\n" +
+            "الاوامر:" + "\n" +
+            "/id - عرض معرفك" + "\n" +
             "/check - التحقق من صلاحيتك"
         )
         if is_authorized(user_id):
-            text += "
-
-" + "انت مصرح لاستخدام بوت التداول!"
+            text += "\n\n" + "انت مصرح لاستخدام بوت التداول!"
         else:
-            text += "
-
-" + "غير مصرح. تواصل مع المشرف."
+            text += "\n\n" + "غير مصرح. تواصل مع المشرف."
         await update.message.reply_text(text)
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    msg = "معرفك:" + "
-" + str(user.id) + "
-
-" + "ارسل هذا المعرف للمشرف لتفعيل حسابك."
+    msg = "معرفك:" + "\n" + str(user.id) + "\n\n" + "ارسل هذا المعرف للمشرف لتفعيل حسابك."
     await update.message.reply_text(msg)
 
 async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,9 +187,7 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if is_authorized(target_id):
             await update.message.reply_text(
-                "المستخدم موجود مسبقا!" + "
-
-" +
+                "المستخدم موجود مسبقا!" + "\n\n" +
                 format_user_info(target_id, target_username, target_first_name)
             )
             return
@@ -216,22 +195,15 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_user(target_id, target_username, target_first_name, user.id)
         
         await update.message.reply_text(
-            "تمت الاضافة!" + "
-
-" +
-            format_user_info(target_id, target_username, target_first_name) + "
-
-" +
+            "تمت الاضافة!" + "\n\n" +
+            format_user_info(target_id, target_username, target_first_name) + "\n\n" +
             "يمكنه الان استخدام بوت التداول."
         )
         
         try:
             notify_msg = (
-                "تم تفعيل حسابك!" + "
-
-" +
-                "لديك الان صلاحية استخدام بوت التداول." + "
-" +
+                "تم تفعيل حسابك!" + "\n\n" +
+                "لديك الان صلاحية استخدام بوت التداول." + "\n" +
                 "اضغط /start في بوت التداول للبدء."
             )
             await context.bot.send_message(chat_id=target_id, text=notify_msg)
@@ -243,12 +215,8 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # الحالة 2: كتابة المعرف مباشرة
     if not context.args:
         await update.message.reply_text(
-            "الاستخدام:" + "
-
-" +
-            "الاسهل: بالرد على رسالة المستخدم واكتب /adduser" + "
-
-" +
+            "الاستخدام:" + "\n\n" +
+            "الاسهل: بالرد على رسالة المستخدم واكتب /adduser" + "\n\n" +
             "او اكتب المعرف: /adduser 123456789"
         )
         return
@@ -258,14 +226,9 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not target_id:
         await update.message.reply_text(
-            "معرف غير صالح!" + "
-
-" +
-            f"المدخل: {raw_id}" + "
-" +
-            "المعرف يجب ان يكون ارقاما فقط." + "
-
-" +
+            "معرف غير صالح!" + "\n\n" +
+            f"المدخل: {raw_id}" + "\n" +
+            "المعرف يجب ان يكون ارقاما فقط." + "\n\n" +
             "جرب الطريقة السهلة: بالرد على رسالة المستخدم واكتب /adduser"
         )
         return
@@ -283,21 +246,15 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(target_id, added_by=user.id)
     
     await update.message.reply_text(
-        "تمت الاضافة!" + "
-
-" +
-        f"المستخدم: {target_id}" + "
-" +
+        "تمت الاضافة!" + "\n\n" +
+        f"المستخدم: {target_id}" + "\n" +
         "يمكنه الان استخدام بوت التداول."
     )
     
     try:
         notify_msg = (
-            "تم تفعيل حسابك!" + "
-
-" +
-            "لديك الان صلاحية استخدام بوت التداول." + "
-" +
+            "تم تفعيل حسابك!" + "\n\n" +
+            "لديك الان صلاحية استخدام بوت التداول." + "\n" +
             "اضغط /start في بوت التداول للبدء."
         )
         await context.bot.send_message(chat_id=target_id, text=notify_msg)
@@ -312,9 +269,7 @@ async def removeuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not context.args:
         await update.message.reply_text(
-            "الاستخدام: /removeuser 123456789" + "
-
-" +
+            "الاستخدام: /removeuser 123456789" + "\n\n" +
             "او استخدم زر حذف مستخدم من القائمة الرئيسية."
         )
         return
@@ -343,12 +298,8 @@ async def removeuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "تأكيد الحذف" + "
-
-" +
-        f"هل انت متأكد من حذف المستخدم {target_id}?" + "
-
-" +
+        "تأكيد الحذف" + "\n\n" +
+        f"هل انت متأكد من حذف المستخدم {target_id}?" + "\n\n" +
         "سيتم الغاء صلاحيته فورا.",
         reply_markup=reply_markup
     )
@@ -381,8 +332,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text("
-".join(lines_list), reply_markup=reply_markup)
+    await update.message.reply_text("\n".join(lines_list), reply_markup=reply_markup)
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -405,33 +355,24 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"المستخدم {target_id} مصرح.")
         else:
             await update.message.reply_text(
-                f"المستخدم {target_id} غير مصرح." + "
-
-" +
+                f"المستخدم {target_id} غير مصرح." + "\n\n" +
                 f"للاضافة: /adduser {target_id}"
             )
     else:
         if is_admin(user.id):
             await update.message.reply_text(
-                "انت المشرف!" + "
-
-" +
+                "انت المشرف!" + "\n\n" +
                 f"معرفك: {user.id}"
             )
         elif is_authorized(user.id):
             await update.message.reply_text(
-                "انت مصرح لاستخدام بوت التداول." + "
-
-" +
+                "انت مصرح لاستخدام بوت التداول." + "\n\n" +
                 f"معرفك: {user.id}"
             )
         else:
             await update.message.reply_text(
-                "غير مصرح!" + "
-
-" +
-                f"معرفك: {user.id}" + "
-" +
+                "غير مصرح!" + "\n\n" +
+                f"معرفك: {user.id}" + "\n" +
                 "تواصل مع المشرف للحصول على الصلاحية."
             )
 
@@ -451,23 +392,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_add":
         keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
         await query.edit_message_text(
-            "اضافة مستخدم" + "
-
-" +
-            "الطريقة الاسهل:" + "
-" +
-            "1. اذهب الى بوت التداول" + "
-" +
-            "2. اضغط رد على رسالة المستخدم" + "
-" +
-            "3. اكتب: /adduser" + "
-
-" +
-            "او اكتب المعرف مباشرة:" + "
-" +
-            "/adduser 123456789" + "
-
-" +
+            "اضافة مستخدم" + "\n\n" +
+            "الطريقة الاسهل:" + "\n" +
+            "1. اذهب الى بوت التداول" + "\n" +
+            "2. اضغط رد على رسالة المستخدم" + "\n" +
+            "3. اكتب: /adduser" + "\n\n" +
+            "او اكتب المعرف مباشرة:" + "\n" +
+            "/adduser 123456789" + "\n\n" +
             "نصيحة: الطريقة الاولى اسهل - لا تحتاج لنسخ المعرف!",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -490,9 +421,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("رجوع", callback_data="menu_main")])
         
         await query.edit_message_text(
-            "اختر المستخدم للحذف:" + "
-
-" +
+            "اختر المستخدم للحذف:" + "\n\n" +
             "تحذير: سيتم الغاء صلاحيته فورا!",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -507,9 +436,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await query.edit_message_text(
-            "تأكيد الحذف" + "
-
-" +
+            "تأكيد الحذف" + "\n\n" +
             f"هل انت متأكد من حذف المستخدم {target_id}?",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -540,11 +467,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=target_id,
                 text=
-                    "تم الغاء صلاحيتك." + "
-
-" +
-                    "لم تعد تستطيع استخدام بوت التداول." + "
-" +
+                    "تم الغاء صلاحيتك." + "\n\n" +
+                    "لم تعد تستطيع استخدام بوت التداول." + "\n" +
                     "تواصل مع المشرف اذا كنت تعتقد ان هذا خطأ."
             )
         except Exception as e:
@@ -552,11 +476,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
         await query.edit_message_text(
-            "تم الحذف!" + "
-
-" +
-            f"المستخدم: {target_id}" + "
-" +
+            "تم الحذف!" + "\n\n" +
+            f"المستخدم: {target_id}" + "\n" +
             "تم الغاء صلاحيته.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -600,8 +521,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         await query.edit_message_text(
-            "
-".join(lines_list),
+            "\n".join(lines_list),
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
@@ -609,12 +529,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_check":
         keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
         await query.edit_message_text(
-            "التحقق من مستخدم" + "
-
-" +
-            "اكتب المعرف: /check 123456789" + "
-
-" +
+            "التحقق من مستخدم" + "\n\n" +
+            "اكتب المعرف: /check 123456789" + "\n\n" +
             "او للتحقق من نفسك فقط اكتب: /check",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -629,14 +545,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         text = (
-            "بوت ادارة الامان v2.0" + "
-
-" +
-            f"مرحبا المشرف {user.first_name}!" + "
-" +
-            f"معرفك: {user.id}" + "
-
-" +
+            "بوت ادارة الامان v2.0" + "\n\n" +
+            f"مرحبا المشرف {user.first_name}!" + "\n" +
+            f"معرفك: {user.id}" + "\n\n" +
             "اختر خيارا من الازرار:"
         )
         
@@ -697,56 +608,6 @@ def main():
         logger.error(f"Polling error: {e}")
         raise
 
-# ============ التشغيل ============
-
-def main():
-    logger.info("Starting Security Bot v2.0 main()...")
-    
-    if not SECURITY_BOT_TOKEN:
-        logger.error("SECURITY_BOT_TOKEN not set! Exiting.")
-        sys.exit(1)
-    logger.info("SECURITY_BOT_TOKEN is set")
-    
-    if not ADMIN_USER_ID:
-        logger.warning("ADMIN_USER_ID not set - no one can manage users!")
-    else:
-        logger.info(f"Admin ID: {ADMIN_USER_ID}")
-    
-    try:
-        init_db()
-    except Exception as e:
-        logger.error(f"Failed to init DB: {e}")
-        sys.exit(1)
-    
-    try:
-        logger.info("Building application...")
-        application = Application.builder().token(SECURITY_BOT_TOKEN).build()
-        logger.info("Application built successfully")
-    except Exception as e:
-        logger.error(f"Failed to build application: {e}")
-        sys.exit(1)
-    
-    logger.info("Adding handlers...")
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("id", id_cmd))
-    application.add_handler(CommandHandler("adduser", adduser_cmd))
-    application.add_handler(CommandHandler("removeuser", removeuser_cmd))
-    application.add_handler(CommandHandler("users", users_cmd))
-    application.add_handler(CommandHandler("check", check_cmd))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("Handlers added")
-    
-    logger.info("Starting polling...")
-    try:
-        application.run_polling(
-            stop_signals=None,
-            close_loop=False,
-            poll_interval=1.0,
-            timeout=10
-        )
-    except Exception as e:
-        logger.error(f"Polling error: {e}")
-        raise
-
 if __name__ == "__main__":
     main()
+ 
