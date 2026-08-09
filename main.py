@@ -104,7 +104,7 @@ MONITOR_INTERVAL = 15
 ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 75
 GEMINI_MODEL = "gemini-3.5-flash"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile deprecated by Groq, shuts down 2026-08-16
 
 # إعدادات الذهب: $1.00 = 100 pip
 GOLD_PIP_VALUE = 0.01
@@ -574,15 +574,15 @@ async def fetch_tf(interval: str, symbol: str = SYMBOL):
         return {}
 
 async def fetch_price():
-    data = await fetch_tf("1min")
-    if data and "values" in data and data["values"]:
-        return float(data["values"][0]["close"])
+    candles = await fetch_tf("1min")
+    if candles:
+        return float(candles[0]["close"])
     async with db_lock: return db["last_price"]
 
 async def fetch_dxy_price():
-    data = await fetch_tf("1min", DXY_SYMBOL)
-    if data and "values" in data and data["values"]:
-        return float(data["values"][0]["close"])
+    candles = await fetch_tf("1min", DXY_SYMBOL)
+    if candles:
+        return float(candles[0]["close"])
     async with db_lock: return db["dxy_price"]
 
 async def fetch_all_tf():
@@ -1273,7 +1273,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         signal_id = data.replace("accept_", "")
         async with db_lock:
             if signal_id not in db["pending_signals"]:
-                await query.answer("⏳ الإشارة منتهية الصلاحية")
+                try:
+                    await query.edit_message_text("⏳ الإشارة منتهية الصلاحية")
+                except Exception:
+                    pass
                 return
             signal_data = db["pending_signals"][signal_id]
             signal_dict = signal_data["signal"]
