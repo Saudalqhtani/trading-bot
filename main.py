@@ -25,76 +25,55 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
-# ============ نظام الأمان - Security System ============
-# يتم تشغيل هذا النظام عبر بوت أمان منفصل (security_bot.py)
-# يشارك نفس قاعدة البيانات مع بوت التداول
-
+# ============ نظام الأمان ============
 import sqlite3
 from functools import wraps
 
-# مسار قاعدة بيانات الأمان المشتركة (نفس قاعدة بيانات التداول)
 SECURITY_DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
 
 
 def init_security_db():
-    """تهيئة قاعدة بيانات الأمان المشتركة"""
     os.makedirs(os.path.dirname(SECURITY_DB_PATH), exist_ok=True)
     conn = sqlite3.connect(SECURITY_DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS authorized_users (
-            user_id TEXT PRIMARY KEY,
-            username TEXT,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            added_by TEXT
-        )
-    ''')
+    cursor.execute("CREATE TABLE IF NOT EXISTS authorized_users (user_id TEXT PRIMARY KEY, username TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by TEXT)")
     conn.commit()
     conn.close()
-    print("✅ قاعدة بيانات الأمان جاهزة")
+    print("Security DB ready")
+
+
+def is_admin(user_id: str) -> bool:
+    return str(user_id) == str(ADMIN_USER_ID)
 
 
 def is_authorized(user_id: str) -> bool:
-    """التحقق من صلاحية المستخدم عبر قاعدة البيانات المشتركة"""
+    if is_admin(user_id):
+        return True
     try:
         conn = sqlite3.connect(SECURITY_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT 1 FROM authorized_users WHERE user_id = ?",
-            (str(user_id),)
-        )
+        cursor.execute("SELECT 1 FROM authorized_users WHERE user_id = ?", (str(user_id),))
         result = cursor.fetchone()
         conn.close()
         return result is not None
     except Exception as e:
-        print(f"⚠️ خطأ التحقق من الصلاحية: {e}")
-        # fallback: إذا فشل الاتصال بالقاعدة، اسمح بالوصول
+        print(f"Auth check error: {e}")
         return True
 
 
 def require_auth(func):
-    """ديكوريتور التحقق من صلاحية المستخدم"""
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
-
         if not is_authorized(user_id):
-            await update.message.reply_text(
-                "⛔ <b>غير مصرح لك!</b>\n\n"
-                "🔒 ليس لديك صلاحية استخدام هذا البوت.\n"
-                "📩 تواصل مع المشرف للحصول على صلاحية.\n\n"
-                f"🆔 معرفك: <code>{user_id}</code>",
-                parse_mode="HTML"
-            )
+            msg = "⛔ غير مصرح لك!" + "\n\n" + "🔒 ليس لديك صلاحية." + "\n" + "📩 تواصل مع المشرف." + "\n\n" + "🆔 معرفك: " + user_id
+            await update.message.reply_text(msg)
             return
-
         return await func(update, context)
     return wrapper
 
-
 # ============ نهاية نظام الأمان ============
-
 
 
 # ============ الاعدادات ============
@@ -1844,4 +1823,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
