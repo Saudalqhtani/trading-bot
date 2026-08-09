@@ -41,7 +41,7 @@ DXY_SYMBOL = "DXY"
 MONITOR_INTERVAL = 15
 ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 75
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-1.5-pro"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # إعدادات الذهب: $1.00 = 100 pip
