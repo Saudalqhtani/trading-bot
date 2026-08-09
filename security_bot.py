@@ -1,5 +1,5 @@
 """
-Security Bot v3 - بوت إدارة الأمان
+Security Bot Final - بوت إدارة الأمان (نسخة نهائية محسّنة)
 """
 
 import os
@@ -16,11 +16,20 @@ DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.DEBUG,
 )
 logger = logging.getLogger(__name__)
 
+# Log startup info
+logger.info("=" * 50)
+logger.info("SECURITY BOT STARTING")
+logger.info(f"DB_PATH: {DB_PATH}")
+logger.info(f"ADMIN_USER_ID set: {bool(ADMIN_USER_ID)}")
+logger.info(f"SECURITY_BOT_TOKEN set: {bool(SECURITY_BOT_TOKEN)}")
+logger.info("=" * 50)
+
 def init_db():
+    logger.info("Initializing DB...")
     try:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
@@ -28,9 +37,9 @@ def init_db():
         cursor.execute("CREATE TABLE IF NOT EXISTS authorized_users (user_id TEXT PRIMARY KEY, username TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by TEXT)")
         conn.commit()
         conn.close()
-        logger.info("Security DB initialized")
+        logger.info("✅ DB initialized successfully")
     except Exception as e:
-        logger.error(f"DB init error: {e}")
+        logger.error(f"❌ DB init error: {e}")
         raise
 
 def is_admin(user_id) -> bool:
@@ -73,6 +82,7 @@ def get_users():
     return users
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Command /start from user {update.effective_user.id}")
     user = update.effective_user
     user_id = user.id
     lines = ["🛡️ بوت إدارة الأمان", "", f"👤 مرحباً {user.first_name}!", f"🆔 معرفك: {user_id}", ""]
@@ -174,34 +184,55 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg)
 
 def main():
-    logger.info("🔧 Starting Security Bot...")
+    logger.info("🔧 Starting Security Bot main()...")
+    
+    # Check token
     if not SECURITY_BOT_TOKEN:
-        logger.error("❌ SECURITY_BOT_TOKEN not set!")
+        logger.error("❌ SECURITY_BOT_TOKEN not set! Exiting.")
         sys.exit(1)
+    logger.info("✅ SECURITY_BOT_TOKEN is set")
+    
+    # Check admin
     if not ADMIN_USER_ID:
-        logger.warning("⚠️ ADMIN_USER_ID not set!")
+        logger.warning("⚠️ ADMIN_USER_ID not set - no one can manage users!")
     else:
         logger.info(f"👑 Admin ID: {ADMIN_USER_ID}")
+    
+    # Init DB
     try:
         init_db()
     except Exception as e:
         logger.error(f"❌ Failed to init DB: {e}")
         sys.exit(1)
+    
+    # Build application
     try:
+        logger.info("Building application...")
         application = Application.builder().token(SECURITY_BOT_TOKEN).build()
-        logger.info("✅ Application built")
+        logger.info("✅ Application built successfully")
     except Exception as e:
-        logger.error(f"❌ Build error: {e}")
+        logger.error(f"❌ Failed to build application: {e}")
         sys.exit(1)
+    
+    # Add handlers
+    logger.info("Adding handlers...")
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("id", id_cmd))
     application.add_handler(CommandHandler("adduser", adduser_cmd))
     application.add_handler(CommandHandler("removeuser", removeuser_cmd))
     application.add_handler(CommandHandler("users", users_cmd))
     application.add_handler(CommandHandler("check", check_cmd))
+    logger.info("✅ Handlers added")
+    
+    # Start polling
     logger.info("🚀 Starting polling...")
     try:
-        application.run_polling(stop_signals=None, close_loop=False)
+        application.run_polling(
+            stop_signals=None,
+            close_loop=False,
+            poll_interval=1.0,
+            timeout=10
+        )
     except Exception as e:
         logger.error(f"❌ Polling error: {e}")
         raise
