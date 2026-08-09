@@ -620,8 +620,6 @@ async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "maxOutputTokens": 2000,
-                "temperature": 0.1,
-                "topP": 0.95,
                 "responseMimeType": "application/json"
             }
         }
@@ -1837,4 +1835,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
