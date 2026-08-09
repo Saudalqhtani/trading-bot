@@ -32,8 +32,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 import sqlite3
 from functools import wraps
 
-# مسار قاعدة بيانات الأمان المشتركة (يمكن تخصيصه عبر متغير بيئة)
-SECURITY_DB_PATH = os.environ.get("SECURITY_DB_PATH", "/app/data/security.db")
+# مسار قاعدة بيانات الأمان المشتركة (نفس قاعدة بيانات التداول)
+SECURITY_DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
 
 
@@ -1827,7 +1827,7 @@ async def main():
         f"💰 حساب PnL صحيح للذهب\n"
         f"🔔 اشعارات اخبار قبل 30 دقيقة\n"
         f"🧠 تقليل استخدام Gemini\n\n"
-        f"استخدم /start للتشغيل"
+        f"استخدم /force لتحليل فوري"
     )
 
     tasks = [
@@ -1844,3 +1844,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
