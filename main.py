@@ -1330,7 +1330,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     if data in handlers:
         try:
-            await handlers[data](query, context)
+            await handlers[data](update, context)
         except Exception as e:
             print(f"❌ خطأ زر {data}: {e}")
             await query.message.reply_text(f"❌ خطأ في تنفيذ الامر: {str(e)[:100]}")
