@@ -1,19 +1,23 @@
 """
-Security Bot v2 - بوت إدارة الأمان
+Security Bot v3 - بوت إدارة الأمان
 """
 
 import os
+import sys
 import sqlite3
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Settings
+# ============ Settings ============
 SECURITY_BOT_TOKEN = os.environ.get("SECURITY_BOT_TOKEN")
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
 DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
 def init_db():
@@ -24,14 +28,17 @@ def init_db():
         cursor.execute("CREATE TABLE IF NOT EXISTS authorized_users (user_id TEXT PRIMARY KEY, username TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by TEXT)")
         conn.commit()
         conn.close()
-        logger.info("DB ready")
+        logger.info("Security DB initialized")
     except Exception as e:
-        logger.error(f"DB error: {e}")
+        logger.error(f"DB init error: {e}")
+        raise
 
 def is_admin(user_id) -> bool:
     return str(user_id) == str(ADMIN_USER_ID)
 
 def is_authorized(user_id) -> bool:
+    if is_admin(user_id):
+        return True
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -86,7 +93,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await update.message.reply_text(f"🆔 معرفك: {user.id}\n\n📋 أرسل هذا المعرف للمشرف.")
+    msg = "🆔 معرفك: " + str(user.id) + "\n\n📋 أرسل هذا المعرف للمشرف."
+    await update.message.reply_text(msg)
 
 async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -103,12 +111,14 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ المعرف يجب أن يكون رقماً!")
         return
     if is_authorized(target_id):
-        await update.message.reply_text(f"⚠️ المستخدم {target_id} موجود مسبقاً.")
+        await update.message.reply_text("⚠️ المستخدم " + target_id + " موجود مسبقاً.")
         return
     add_user(target_id, added_by=user.id)
-    await update.message.reply_text(f"✅ تمت الإضافة!\n\n🆔 المستخدم: {target_id}\n🔓 يمكنه الآن استخدام بوت التداول.")
+    msg = "✅ تمت الإضافة!" + "\n\n" + "🆔 المستخدم: " + target_id + "\n" + "🔓 يمكنه الآن استخدام بوت التداول."
+    await update.message.reply_text(msg)
     try:
-        await context.bot.send_message(chat_id=target_id, text="🎉 تم تفعيل حسابك!\n\n✅ لديك الآن صلاحية استخدام بوت التداول.\nاضغط /start في بوت التداول.")
+        notify_msg = "🎉 تم تفعيل حسابك!" + "\n\n" + "✅ لديك الآن صلاحية استخدام بوت التداول." + "\n" + "اضغط /start في بوت التداول."
+        await context.bot.send_message(chat_id=target_id, text=notify_msg)
     except Exception as e:
         logger.warning(f"Notify error: {e}")
 
@@ -122,10 +132,10 @@ async def removeuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     target_id = context.args[0]
     if not is_authorized(target_id):
-        await update.message.reply_text(f"⚠️ المستخدم {target_id} غير موجود.")
+        await update.message.reply_text("⚠️ المستخدم " + target_id + " غير موجود.")
         return
     remove_user(target_id)
-    await update.message.reply_text(f"🗑️ تم حذف المستخدم {target_id}")
+    await update.message.reply_text("🗑️ تم حذف المستخدم " + target_id)
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -151,35 +161,50 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         target_id = context.args[0]
         if is_authorized(target_id):
-            await update.message.reply_text(f"✅ المستخدم {target_id} مصرح.")
+            await update.message.reply_text("✅ المستخدم " + target_id + " مصرح.")
         else:
-            await update.message.reply_text(f"⛔ المستخدم {target_id} غير مصرح.")
+            await update.message.reply_text("⛔ المستخدم " + target_id + " غير مصرح.")
     else:
         if is_admin(user.id):
             await update.message.reply_text("👑 أنت المشرف!")
         elif is_authorized(user.id):
             await update.message.reply_text("✅ أنت مصرح لاستخدام بوت التداول.")
         else:
-            await update.message.reply_text(f"⛔ غير مصرح!\n\n🆔 معرفك: {user.id}\n📩 تواصل مع المشرف.")
+            msg = "⛔ غير مصرح!" + "\n\n" + "🆔 معرفك: " + str(user.id) + "\n" + "📩 تواصل مع المشرف."
+            await update.message.reply_text(msg)
 
 def main():
-    init_db()
+    logger.info("🔧 Starting Security Bot...")
     if not SECURITY_BOT_TOKEN:
-        logger.error("SECURITY_BOT_TOKEN missing!")
-        return
+        logger.error("❌ SECURITY_BOT_TOKEN not set!")
+        sys.exit(1)
     if not ADMIN_USER_ID:
-        logger.warning("ADMIN_USER_ID missing!")
+        logger.warning("⚠️ ADMIN_USER_ID not set!")
     else:
-        logger.info(f"Admin: {ADMIN_USER_ID}")
-    application = Application.builder().token(SECURITY_BOT_TOKEN).build()
+        logger.info(f"👑 Admin ID: {ADMIN_USER_ID}")
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"❌ Failed to init DB: {e}")
+        sys.exit(1)
+    try:
+        application = Application.builder().token(SECURITY_BOT_TOKEN).build()
+        logger.info("✅ Application built")
+    except Exception as e:
+        logger.error(f"❌ Build error: {e}")
+        sys.exit(1)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("id", id_cmd))
     application.add_handler(CommandHandler("adduser", adduser_cmd))
     application.add_handler(CommandHandler("removeuser", removeuser_cmd))
     application.add_handler(CommandHandler("users", users_cmd))
     application.add_handler(CommandHandler("check", check_cmd))
-    logger.info("🚀 Security bot starting...")
-    application.run_polling()
+    logger.info("🚀 Starting polling...")
+    try:
+        application.run_polling(stop_signals=None, close_loop=False)
+    except Exception as e:
+        logger.error(f"❌ Polling error: {e}")
+        raise
 
 if __name__ == "__main__":
-    main() 
+    main()
