@@ -72,12 +72,12 @@ def require_auth(func):
             user_id = str(update.effective_user.id)
 
         if not is_authorized(user_id):
-            msg = "⛔ غير مصرح لك!" + "
-
-" + "🔒 ليس لديك صلاحية." + "
-" + "📩 تواصل مع المشرف." + "
-
-" + "🆔 معرفك: " + user_id
+            msg = (
+                "⛔ غير مصرح لك!\n\n"
+                "🔒 ليس لديك صلاحية.\n"
+                "📩 تواصل مع المشرف.\n\n"
+                "🆔 معرفك: " + user_id
+            )
             if update.effective_message:
                 await update.effective_message.reply_text(msg)
             return
