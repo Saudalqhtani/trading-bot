@@ -65,14 +65,10 @@ def is_authorized(user_id: str) -> bool:
 def require_auth(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Handle both direct messages and callback queries
-        if update.callback_query:
-            user_id = str(update.callback_query.from_user.id)
-        else:
-            user_id = str(update.effective_user.id)
+        user_id = str(update.effective_user.id)
         if not is_authorized(user_id):
             msg = "⛔ غير مصرح لك!" + "\n\n" + "🔒 ليس لديك صلاحية." + "\n" + "📩 تواصل مع المشرف." + "\n\n" + "🆔 معرفك: " + user_id
-            await reply_to_user(update, msg)
+            await update.message.reply_text(msg)
             return
         return await func(update, context)
     return wrapper
@@ -80,14 +76,13 @@ def require_auth(func):
 # ============ نهاية نظام الأمان ============
 
 # ============ Helper for reply ============
-async def reply_to_user(update: Update, text: str, parse_mode: str = "HTML"):
-    """Reply to user whether from command or callback query"""
+def _get_message(update: Update):
+    """Get the message object from update, handling both messages and callback queries"""
     if update.message:
-        await reply_to_user(update, text, parse_mode=parse_mode)
+        return update.message
     elif update.callback_query and update.callback_query.message:
-        await update.callback_query.message.reply_text(text, parse_mode=parse_mode)
-    else:
-        await send_msg(text)
+        return update.callback_query.message
+    return None
 # ============ نهاية Helper ============
 
 
@@ -956,21 +951,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⏸️ ايقاف", callback_data="pause"), InlineKeyboardButton("▶️ استئناف", callback_data="resume")],
     ]
     reply = InlineKeyboardMarkup(keyboard)
-    text = "🤖 <b>بوت الذهب الذكي v7.0</b>\n\n"
-"✅ الميزات الجديدة:\n"
-"• 💾 حفظ البيانات في SQLite\n"
-"• 📋 JSON Structured Output\n"
-"• ✅ نظام تأكيد يدوي للصفقات\n"
-"• 💰 حساب PnL صحيح للذهب\n"
-"• 🔔 اشعارات اخبار قبل 30 دقيقة\n"
-"• 🧠 تقليل استخدام Gemini\n"
-"• 📊 تحديثات فقط عند التغيرات المهمة\n\n"
-"اختر خياراً:",
-parse_mode="HTML", reply_markup=reply
-    if update.message:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply)
-    elif update.callback_query and update.callback_query.message:
-        await update.callback_query.message.reply_text(text, parse_mode="HTML", reply_markup=reply)
+    await update.message.reply_text(
+        "🤖 <b>بوت الذهب الذكي v7.0</b>\n\n"
+        "✅ الميزات الجديدة:\n"
+        "• 💾 حفظ البيانات في SQLite\n"
+        "• 📋 JSON Structured Output\n"
+        "• ✅ نظام تأكيد يدوي للصفقات\n"
+        "• 💰 حساب PnL صحيح للذهب\n"
+        "• 🔔 اشعارات اخبار قبل 30 دقيقة\n"
+        "• 🧠 تقليل استخدام Gemini\n"
+        "• 📊 تحديثات فقط عند التغيرات المهمة\n\n"
+        "اختر خياراً:",
+        parse_mode="HTML", reply_markup=reply
+    )
 
 @require_auth
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1008,7 +1001,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ATR: {atr_current:.2f} | DXY: {dxy:.2f}
 🤖 Gemini اليوم: {gemini_calls}
 ⏱️ وقت التشغيل: {uptime_str}"""
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @require_auth
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1024,18 +1017,18 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pips, _ = calculate_pnl(direction, entry, price)
                 pnl_usd = calculate_pnl_usd(pips, active.get("lot_size", 0.01))
                 msg += f"\n\n📊 <b>الصفقة النشطة:</b>\n{direction} @ {entry:,.2f}\nP&L: {pips:+.1f} نقاط ({pnl_usd:+.2f}$)"
-        await reply_to_user(update, msg, parse_mode="HTML")
+        await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
-        await reply_to_user(update, f"❌ خطأ: {e}")
+        await update.message.reply_text(f"❌ خطأ: {e}")
 
 @require_auth
 async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         if not db["signals"]:
-            await reply_to_user(update, "⏳ لا توجد اشارات بعد")
+            await update.message.reply_text("⏳ لا توجد اشارات بعد")
             return
         last = db["signals"][-1]
-    await reply_to_user(update, f"📈 <b>آخر اشارة</b>\n\n{last['text']}", parse_mode="HTML")
+    await update.message.reply_text(f"📈 <b>آخر اشارة</b>\n\n{last['text']}", parse_mode="HTML")
 
 @require_auth
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1061,21 +1054,21 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💵 الرصيد: {balance:,.2f} USD
 📈 ربح/خسارة: {(balance - initial):+,.2f} USD
 {recent_trades}"""
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @require_auth
 async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await generate_performance_summary("weekly")
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @require_auth
 async def cmd_monthly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await generate_performance_summary("monthly")
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @require_auth
 async def cmd_equity_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await reply_to_user(update, "⏳ جاري انشاء الرسم...")
+    await update.message.reply_text("⏳ جاري انشاء الرسم...")
     chart_path = await generate_equity_chart()
     if chart_path:
         async with db_lock:
@@ -1084,7 +1077,7 @@ async def cmd_equity_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = f"📈 <b>نمو الرصيد</b>\nالحالي: <code>{balance:,.2f}</code> USD\nربح/خسارة: <code>{(balance - initial):+,.2f}</code> USD"
         await send_photo(chart_path, caption)
     else:
-        await reply_to_user(update, "❌ فشل انشاء الرسم")
+        await update.message.reply_text("❌ فشل انشاء الرسم")
 
 @require_auth
 async def cmd_atr(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1092,47 +1085,49 @@ async def cmd_atr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         atr = db["atr_data"]["current"]
         threshold = db["atr_data"]["threshold"]
     status = "🟢 طبيعي" if atr <= threshold else "🔴 مرتفع"
-    await reply_to_user(update, f"⚡ <b>ATR</b>\nالحالي: {atr:.2f}\nالحد: {threshold}\nالحالة: {status}", parse_mode="HTML")
+    await update.message.reply_text(f"⚡ <b>ATR</b>\nالحالي: {atr:.2f}\nالحد: {threshold}\nالحالة: {status}", parse_mode="HTML")
 
 @require_auth
 async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         errors = db["api_errors"][-10:]
     if not errors:
-        await reply_to_user(update, "✅ لا اخطاء")
+        await update.message.reply_text("✅ لا اخطاء")
         return
     msg = "🔍 <b>آخر 10 اخطاء:</b>\n\n"
     for i, err in enumerate(errors, 1):
         msg += f"{i}. [{err['time']}] {err['type']}: {err['error'][:60]}\n"
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 
 
 @require_auth
 async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_weekend():
-        await reply_to_user(update,
+        await update.message.reply_text(
+            "🛑 <b>عطلة نهاية الاسبوع!</b>\n\n"
+            "⏸️ السوق مغلق اليوم (السبت/الاحد)\n"
             "📅 سيتم استئناف التحليل يوم الاثنين\n"
             "🕐 الجلسة الاولى: لندن 07:00 UTC",
             parse_mode="HTML"
         )
         return
-    await reply_to_user(update, "🔄 <b>جاري التحليل الفوري...</b>", parse_mode="HTML")
+    await update.message.reply_text("🔄 <b>جاري التحليل الفوري...</b>", parse_mode="HTML")
     try:
         tf_data = await fetch_all_tf()
         dxy_price = await fetch_dxy_price()
         missing = [k for k, v in tf_data.items() if not v]
         if missing:
-            await reply_to_user(update, f"⚠️ بيانات ناقصة: {', '.join(missing)}")
+            await update.message.reply_text(f"⚠️ بيانات ناقصة: {', '.join(missing)}")
             return
 
         signal, consensus_status, consensus_confidence = await consensus_analysis(tf_data, dxy_price)
 
         if signal is None:
             if consensus_status == "DISAGREEMENT":
-                await reply_to_user(update, "❌ <b>خلاف بين النماذج</b>\nالقرار: HOLD\nانتظر فرصة أوضح", parse_mode="HTML")
+                await update.message.reply_text("❌ <b>خلاف بين النماذج</b>\nالقرار: HOLD\nانتظر فرصة أوضح", parse_mode="HTML")
             else:
-                await reply_to_user(update, "❌ <b>خطأ في التحليل</b>\nحاول مرة أخرى", parse_mode="HTML")
+                await update.message.reply_text("❌ <b>خطأ في التحليل</b>\nحاول مرة أخرى", parse_mode="HTML")
             return
 
         async with db_lock:
@@ -1177,7 +1172,7 @@ async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await send_msg(f"{emoji} <b>تحليل فوري ({signal.decision} - ثقة {signal.confidence}%)</b>\n\n{signal.summary}")
 
     except Exception as e:
-        await reply_to_user(update, f"❌ <b>خطأ:</b>\n{str(e)}")
+        await update.message.reply_text(f"❌ <b>خطأ:</b>\n{str(e)}")
 
 @require_auth
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1188,31 +1183,31 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 0.1 <= new_risk <= 5.0:
                 async with db_lock: db["risk_percent"] = new_risk
                 await save_state()
-                await reply_to_user(update, f"✅ <b>تم التعديل:</b> <code>{new_risk}%</code>", parse_mode="HTML")
+                await update.message.reply_text(f"✅ <b>تم التعديل:</b> <code>{new_risk}%</code>", parse_mode="HTML")
             else:
-                await reply_to_user(update, "❌ بين 0.1% و 5.0%", parse_mode="HTML")
+                await update.message.reply_text("❌ بين 0.1% و 5.0%", parse_mode="HTML")
         except ValueError:
-            await reply_to_user(update, "❌ استخدم: /risk 1.5", parse_mode="HTML")
+            await update.message.reply_text("❌ استخدم: /risk 1.5", parse_mode="HTML")
     else:
-        await reply_to_user(update, f"📊 المخاطرة: <code>{current_risk}%</code>", parse_mode="HTML")
+        await update.message.reply_text(f"📊 المخاطرة: <code>{current_risk}%</code>", parse_mode="HTML")
 
 @require_auth
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: db["paused"] = True
     await save_state()
-    await reply_to_user(update, "⏸️ <b>تم الايقاف</b>", parse_mode="HTML")
+    await update.message.reply_text("⏸️ <b>تم الايقاف</b>", parse_mode="HTML")
 
 @require_auth
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: db["paused"] = False
     await save_state()
-    await reply_to_user(update, "▶️ <b>تم الاستئناف</b>", parse_mode="HTML")
+    await update.message.reply_text("▶️ <b>تم الاستئناف</b>", parse_mode="HTML")
 
 @require_auth
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: news_list = db["upcoming_news"][:5]
     if not news_list:
-        await reply_to_user(update, "📰 لا توجد اخبار عاجلة قادمة")
+        await update.message.reply_text("📰 لا توجد اخبار عاجلة قادمة")
         return
     msg = "📰 <b>الاخبار القادمة:</b>\n\n"
     for news in news_list:
@@ -1221,40 +1216,42 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif minutes > -60: time_str = "جارية الان!"
         else: time_str = "انتهت"
         msg += f"• <b>{news['title']}</b>\n  ⏰ {time_str} ({news['time'].strftime('%H:%M')} UTC)\n\n"
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @require_auth
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: trades = db["trades"]
     if not trades:
-        await reply_to_user(update, "📋 لا توجد صفقات مغلقة بعد")
+        await update.message.reply_text("📋 لا توجد صفقات مغلقة بعد")
         return
     msg = f"📋 <b>الصفقات المغلقة ({len(trades)}):</b>\n\n"
     for i, t in enumerate(trades[-20:], 1):
         result_emoji = "✅" if t.get("result") == "win" else "❌"
         msg += f"{i}. {result_emoji} <b>{t['direction']}</b> @ {t['entry_price']:,.2f}\n   الخروج: {t['exit_price']:,.2f} | النتيجة: {t['pnl_pips']:+.1f} نقاط ({t.get('pnl_usd', 0):+.2f}$)\n   الثقة: {t.get('confidence', 'N/A')}% | {t['close_time']}\n\n"
-    await reply_to_user(update, msg, parse_mode="HTML")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @require_auth
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await reply_to_user(update, "🤖 <b>الاوامر</b>\n"
-"/start - القائمة\n"
-"/status - الحالة\n"
-"/price - الاسعار\n"
-"/signal - آخر اشارة\n"
-"/stats - الاحصائيات\n"
-"/trades - الصفقات المغلقة\n"
-"/weekly - اسبوعي\n"
-"/monthly - شهري\n"
-"/equity - رسم بياني\n"
-"/atr - ATR\n"
-"/errors - الاخطاء\n"
-"/force - تحليل فوري\n"
-"/news - الاخبار القادمة\n"
-"/risk - المخاطرة\n"
-"/pause - ايقاف\n"
-"/resume - استئناف",
-parse_mode="HTML", parse_mode="HTML")
+    await update.message.reply_text(
+        "🤖 <b>الاوامر</b>\n"
+        "/start - القائمة\n"
+        "/status - الحالة\n"
+        "/price - الاسعار\n"
+        "/signal - آخر اشارة\n"
+        "/stats - الاحصائيات\n"
+        "/trades - الصفقات المغلقة\n"
+        "/weekly - اسبوعي\n"
+        "/monthly - شهري\n"
+        "/equity - رسم بياني\n"
+        "/atr - ATR\n"
+        "/errors - الاخطاء\n"
+        "/force - تحليل فوري\n"
+        "/news - الاخبار القادمة\n"
+        "/risk - المخاطرة\n"
+        "/pause - ايقاف\n"
+        "/resume - استئناف",
+        parse_mode="HTML"
+    )
 
 
 
@@ -1347,7 +1344,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handlers[data](update, context)
         except Exception as e:
             print(f"❌ خطأ زر {data}: {e}")
-            await query.message.reply_text(f"❌ خطأ في تنفيذ الامر: {str(e)[:100]}")
+            if query.message:
+                await query.message.reply_text(f"❌ خطأ في تنفيذ الامر: {str(e)[:100]}")
     elif data == "pause":
         async with db_lock: db["paused"] = True
         await save_state()
