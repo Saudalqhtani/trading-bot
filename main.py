@@ -25,6 +25,78 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
+# ============ نظام الأمان - Security System ============
+# يتم تشغيل هذا النظام عبر بوت أمان منفصل (security_bot.py)
+# يشارك نفس قاعدة البيانات مع بوت التداول
+
+import sqlite3
+from functools import wraps
+
+# مسار قاعدة بيانات الأمان المشتركة (يمكن تخصيصه عبر متغير بيئة)
+SECURITY_DB_PATH = os.environ.get("SECURITY_DB_PATH", "/app/data/security.db")
+ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
+
+
+def init_security_db():
+    """تهيئة قاعدة بيانات الأمان المشتركة"""
+    os.makedirs(os.path.dirname(SECURITY_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(SECURITY_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS authorized_users (
+            user_id TEXT PRIMARY KEY,
+            username TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_by TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print("✅ قاعدة بيانات الأمان جاهزة")
+
+
+def is_authorized(user_id: str) -> bool:
+    """التحقق من صلاحية المستخدم عبر قاعدة البيانات المشتركة"""
+    try:
+        conn = sqlite3.connect(SECURITY_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM authorized_users WHERE user_id = ?",
+            (str(user_id),)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        print(f"⚠️ خطأ التحقق من الصلاحية: {e}")
+        # fallback: إذا فشل الاتصال بالقاعدة، اسمح بالوصول
+        return True
+
+
+def require_auth(func):
+    """ديكوريتور التحقق من صلاحية المستخدم"""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+
+        if not is_authorized(user_id):
+            await update.message.reply_text(
+                "⛔ <b>غير مصرح لك!</b>\n\n"
+                "🔒 ليس لديك صلاحية استخدام هذا البوت.\n"
+                "📩 تواصل مع المشرف للحصول على صلاحية.\n\n"
+                f"🆔 معرفك: <code>{user_id}</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        return await func(update, context)
+    return wrapper
+
+
+# ============ نهاية نظام الأمان ============
+
+
+
 # ============ الاعدادات ============
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -41,7 +113,7 @@ DXY_SYMBOL = "DXY"
 MONITOR_INTERVAL = 15
 ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 75
-GEMINI_MODEL = "gemini-1.5-pro"
+GEMINI_MODEL = "gemini-3.5-flash"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # إعدادات الذهب: $1.00 = 100 pip
@@ -878,6 +950,7 @@ async def generate_equity_chart():
 
 # ============ أوامر Telegram ============
 
+@require_auth
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الحالة", callback_data="status"), InlineKeyboardButton("💵 السعر", callback_data="price")],
@@ -902,6 +975,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML", reply_markup=reply
     )
 
+@require_auth
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         paused = db["paused"]
@@ -939,6 +1013,7 @@ ATR: {atr_current:.2f} | DXY: {dxy:.2f}
 ⏱️ وقت التشغيل: {uptime_str}"""
     await update.message.reply_text(msg, parse_mode="HTML")
 
+@require_auth
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         price = await fetch_price()
@@ -956,6 +1031,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
 
+@require_auth
 async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         if not db["signals"]:
@@ -964,6 +1040,7 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last = db["signals"][-1]
     await update.message.reply_text(f"📈 <b>آخر اشارة</b>\n\n{last['text']}", parse_mode="HTML")
 
+@require_auth
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         stats = db["stats"]
@@ -989,14 +1066,17 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {recent_trades}"""
     await update.message.reply_text(msg, parse_mode="HTML")
 
+@require_auth
 async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await generate_performance_summary("weekly")
     await update.message.reply_text(msg, parse_mode="HTML")
 
+@require_auth
 async def cmd_monthly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await generate_performance_summary("monthly")
     await update.message.reply_text(msg, parse_mode="HTML")
 
+@require_auth
 async def cmd_equity_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري انشاء الرسم...")
     chart_path = await generate_equity_chart()
@@ -1009,6 +1089,7 @@ async def cmd_equity_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ فشل انشاء الرسم")
 
+@require_auth
 async def cmd_atr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         atr = db["atr_data"]["current"]
@@ -1016,6 +1097,7 @@ async def cmd_atr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "🟢 طبيعي" if atr <= threshold else "🔴 مرتفع"
     await update.message.reply_text(f"⚡ <b>ATR</b>\nالحالي: {atr:.2f}\nالحد: {threshold}\nالحالة: {status}", parse_mode="HTML")
 
+@require_auth
 async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock:
         errors = db["api_errors"][-10:]
@@ -1029,6 +1111,7 @@ async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+@require_auth
 async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_weekend():
         await update.message.reply_text(
@@ -1101,6 +1184,7 @@ async def cmd_force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         await update.message.reply_text(f"❌ <b>خطأ:</b>\n{str(e)}")
 
+@require_auth
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: current_risk = db["risk_percent"]
     if context.args:
@@ -1117,16 +1201,19 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"📊 المخاطرة: <code>{current_risk}%</code>", parse_mode="HTML")
 
+@require_auth
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: db["paused"] = True
     await save_state()
     await update.message.reply_text("⏸️ <b>تم الايقاف</b>", parse_mode="HTML")
 
+@require_auth
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: db["paused"] = False
     await save_state()
     await update.message.reply_text("▶️ <b>تم الاستئناف</b>", parse_mode="HTML")
 
+@require_auth
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: news_list = db["upcoming_news"][:5]
     if not news_list:
@@ -1141,6 +1228,7 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• <b>{news['title']}</b>\n  ⏰ {time_str} ({news['time'].strftime('%H:%M')} UTC)\n\n"
     await update.message.reply_text(msg, parse_mode="HTML")
 
+@require_auth
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: trades = db["trades"]
     if not trades:
@@ -1152,6 +1240,7 @@ async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{i}. {result_emoji} <b>{t['direction']}</b> @ {t['entry_price']:,.2f}\n   الخروج: {t['exit_price']:,.2f} | النتيجة: {t['pnl_pips']:+.1f} نقاط ({t.get('pnl_usd', 0):+.2f}$)\n   الثقة: {t.get('confidence', 'N/A')}% | {t['close_time']}\n\n"
     await update.message.reply_text(msg, parse_mode="HTML")
 
+@require_auth
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 <b>الاوامر</b>\n"
@@ -1176,6 +1265,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+@require_auth
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     async with db_lock:
@@ -1698,6 +1788,7 @@ async def save_state_coro():
 async def main():
     # تهيئة قاعدة البيانات
     init_db()
+    init_security_db()
     await load_state()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -1736,7 +1827,7 @@ async def main():
         f"💰 حساب PnL صحيح للذهب\n"
         f"🔔 اشعارات اخبار قبل 30 دقيقة\n"
         f"🧠 تقليل استخدام Gemini\n\n"
-        f"استخدم /force لتحليل فوري"
+        f"استخدم /start للتشغيل"
     )
 
     tasks = [
