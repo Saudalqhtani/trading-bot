@@ -603,6 +603,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     
+    if data.startswith("quickadd_"):
+        target_id = data.replace("quickadd_", "")
+        if is_authorized(target_id):
+            await query.edit_message_text(f"✅ المستخدم {target_id} مصرح مسبقًا.")
+            return
+        add_user(target_id, added_by=user.id)
+        await query.edit_message_text(f"✅ تمت اضافة المستخدم {target_id} فورًا.")
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="✅ تم تفعيل حسابك! لديك الآن صلاحية استخدام بوت التداول. اضغط /start في بوت التداول للبدء."
+            )
+        except Exception as e:
+            logger.warning(f"Notify error: {e}")
+        return
+    
     if data == "menu_add":
         keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
         await query.edit_message_text(
