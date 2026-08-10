@@ -184,8 +184,8 @@ GROQ_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile deprecated by Groq
 GOLD_PIP_VALUE = 0.01
 GOLD_PIP_USD_PER_LOT = 1.0
 
-TRADE_MONITOR_INTERVAL = 30
-PRICE_POLL_INTERVAL = 60
+TRADE_MONITOR_INTERVAL = 180
+PRICE_POLL_INTERVAL = 180
 NEWS_CHECK_INTERVAL = 300
 SIGNIFICANT_MOVE_PIPS = 5
 
@@ -1672,7 +1672,7 @@ async def opportunity_analyzer_coro():
                     reason = f"تغير سعري كبير ({price_diff_pips:.1f} نقاط)"
 
             elapsed = time.time() - last_analysis
-            if elapsed >= 600:
+            if elapsed >= ANALYSIS_INTERVAL:
                 should_analyze = True
                 reason = f"مرور {elapsed/60:.0f} دقيقة على آخر تحليل"
 
