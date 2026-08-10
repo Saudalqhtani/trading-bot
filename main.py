@@ -290,6 +290,8 @@ async def save_state():
             "gemini_calls_today": str(db["gemini_calls_today"]),
             "last_analysis_ts": str(db["last_analysis_ts"]),
             "last_session_analysis": db["last_session_analysis"],
+            "twelvedata_paused_until": str(db["twelvedata_paused_until"]),
+            "twelvedata_pause_notified": str(int(db["twelvedata_pause_notified"])),
         }
         for key, value in state_data.items():
             cursor.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, value))
@@ -315,6 +317,8 @@ async def load_state():
             elif key == "gemini_calls_today": db["gemini_calls_today"] = int(value)
             elif key == "last_analysis_ts": db["last_analysis_ts"] = float(value)
             elif key == "last_session_analysis": db["last_session_analysis"] = value
+            elif key == "twelvedata_paused_until": db["twelvedata_paused_until"] = float(value)
+            elif key == "twelvedata_pause_notified": db["twelvedata_pause_notified"] = bool(int(value))
         cursor.execute("SELECT * FROM trades ORDER BY created_at DESC")
         trades = cursor.fetchall()
         columns = [c[0] for c in cursor.description]
@@ -427,6 +431,8 @@ db = {
     "active_trade": None,
     "pending_signals": {},
     "last_analysis_ts": 0,
+    "twelvedata_paused_until": 0,
+    "twelvedata_pause_notified": False,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
     "last_price": 2650.0,
@@ -632,7 +638,37 @@ async def send_photo(photo_path: str, caption: str = ""):
     except Exception as e:
         print(f"❌ فشل ارسال صورة: {e}")
 
+def _next_utc_midnight_ts() -> float:
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return tomorrow.timestamp()
+
+async def _mark_twelvedata_exhausted(message: str):
+    async with db_lock:
+        already_notified = db["twelvedata_pause_notified"]
+        db["twelvedata_paused_until"] = _next_utc_midnight_ts()
+        db["twelvedata_pause_notified"] = True
+    if not already_notified:
+        await send_msg(
+            "⛔ <b>نفذ رصيد TwelveData اليومي</b>\n\n"
+            f"{message}\n\n"
+            "تم إيقاف طلبات الأسعار تلقائيًا حتى تصفير الرصيد (منتصف الليل UTC) لتوفير أي رصيد متبقي، "
+            "وسيستأنف التحليل تلقائيًا بعدها."
+        )
+
+async def _twelvedata_paused() -> bool:
+    async with db_lock:
+        paused_until = db["twelvedata_paused_until"]
+        if paused_until and time.time() < paused_until:
+            return True
+        if paused_until and time.time() >= paused_until:
+            db["twelvedata_paused_until"] = 0
+            db["twelvedata_pause_notified"] = False
+        return False
+
 async def fetch_tf(interval: str, symbol: str = SYMBOL):
+    if await _twelvedata_paused():
+        return {}
     try:
         url = "https://api.twelvedata.com/time_series"
         params = {"symbol": symbol, "interval": interval, "outputsize": 20, "apikey": TWELVE_DATA_API_KEY}
@@ -640,7 +676,10 @@ async def fetch_tf(interval: str, symbol: str = SYMBOL):
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
                 if "code" in data and data["code"] != 200:
-                    print(f"⚠️ Twelve Data خطأ {interval}: {data.get('message', 'unknown')}")
+                    error_msg = data.get("message", "unknown")
+                    print(f"⚠️ Twelve Data خطأ {interval}: {error_msg}")
+                    if "run out of api credits" in error_msg.lower():
+                        await _mark_twelvedata_exhausted(error_msg)
                     return {}
                 if "values" in data and data["values"]:
                     candles = data["values"]
@@ -1656,6 +1695,8 @@ async def opportunity_analyzer_coro():
                 missing = [k for k, v in tf_data.items() if not v]
                 if missing:
                     print(f"⚠️ [opportunity] بيانات ناقصة: {missing}")
+                    async with db_lock:
+                        db["last_analysis_ts"] = time.time()
                     await asyncio.sleep(30)
                     continue
 
@@ -1947,3 +1988,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
