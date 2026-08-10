@@ -15,6 +15,7 @@ import logging
 import re
 import csv
 import io
+import time
 from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -25,6 +26,10 @@ SECURITY_BOT_TOKEN = os.environ.get("SECURITY_BOT_TOKEN")
 _admin_raw = os.environ.get("ADMIN_USER_IDS", "") or os.environ.get("ADMIN_USER_ID", "")
 ADMIN_USER_IDS = set(x.strip() for x in _admin_raw.split(",") if x.strip())
 DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
+# يظهر للمستخدم غير المصرح كطريقة تواصل مع المشرف، مثلا: @my_username
+ADMIN_CONTACT = os.environ.get("ADMIN_CONTACT", "")
+
+_unauth_alert_cooldown = {}  # user_id -> آخر وقت تم تنبيه المشرف فيه، لمنع الإزعاج المتكرر
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -126,6 +131,32 @@ def is_authorized(user_id) -> bool:
         logger.error(f"Auth check error: {e}")
         return False
 
+def contact_admin_text() -> str:
+    if ADMIN_CONTACT:
+        return f"تواصل مع المشرف: {ADMIN_CONTACT}"
+    return "تواصل مع المشرف للحصول على الصلاحية."
+
+async def alert_admins_unauthorized(context: ContextTypes.DEFAULT_TYPE, user_id, username, first_name):
+    """ينبّه كل المشرفين بمحاولة دخول غير مصرح على بوت الأمان نفسه، مع زر اضافة سريع (كل 10 دقائق كحد أقصى لنفس المستخدم)"""
+    if not ADMIN_USER_IDS:
+        return
+    now = time.time()
+    last = _unauth_alert_cooldown.get(str(user_id), 0)
+    if now - last < 600:
+        return
+    _unauth_alert_cooldown[str(user_id)] = now
+
+    display_name = first_name or (f"@{username}" if username else f"مستخدم {user_id}")
+    text = f"🚨 محاولة دخول غير مصرحة (بوت الأمان)\n\nالاسم: {display_name}\nالمعرف: {user_id}"
+    if username:
+        text += f"\nاليوزر: @{username}"
+    keyboard = [[InlineKeyboardButton("✅ اضافة فورية", callback_data=f"quickadd_{user_id}")]]
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e:
+            logger.warning(f"Admin alert failed for {admin_id}: {e}")
+
 def add_user(user_id, username=None, first_name=None, added_by=None, expires_at=None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -212,6 +243,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("حذف مستخدم", callback_data="menu_remove")],
             [InlineKeyboardButton("قائمة المستخدمين", callback_data="menu_users")],
             [InlineKeyboardButton("التحقق من مستخدم", callback_data="menu_check")],
+            [InlineKeyboardButton("📋 سجل النشاط", callback_data="menu_log"),
+             InlineKeyboardButton("📊 تصدير CSV", callback_data="menu_export")],
+            [InlineKeyboardButton("📢 بث جماعي", callback_data="menu_broadcast")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -219,10 +253,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "بوت ادارة الامان v2.0" + "\n\n" +
             f"مرحبا المشرف {user.first_name}!" + "\n" +
             f"معرفك: {user_id}" + "\n\n" +
-            "اوامر اضافية:" + "\n" +
-            "/log - سجل النشاط" + "\n" +
-            "/broadcast <رسالة> - بث جماعي" + "\n" +
-            "/export - تصدير CSV" + "\n\n" +
             "اختر خيارا من الازرار:"
         )
         await update.message.reply_text(text, reply_markup=reply_markup)
@@ -237,9 +267,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if is_authorized(user_id):
             text += "\n\n" + "انت مصرح لاستخدام بوت التداول!"
+            await update.message.reply_text(text)
         else:
-            text += "\n\n" + "غير مصرح. تواصل مع المشرف."
-        await update.message.reply_text(text)
+            text += "\n\n" + contact_admin_text()
+            await update.message.reply_text(text)
+            await alert_admins_unauthorized(context, user_id, user.username, user.first_name)
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -476,8 +508,9 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "غير مصرح!" + "\n\n" +
                 f"معرفك: {user.id}" + "\n" +
-                "تواصل مع المشرف للحصول على الصلاحية."
+                contact_admin_text()
             )
+            await alert_admins_unauthorized(context, user.id, user.username, user.first_name)
 
 # ============ سجل النشاط ============
 
@@ -617,6 +650,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.warning(f"Notify error: {e}")
+        return
+    
+    if data == "menu_log":
+        keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
+        entries = get_activity_log(limit=15)
+        if not entries:
+            await query.edit_message_text(
+                "لا يوجد نشاط مسجل بعد.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        lines_list = ["📋 آخر 15 نشاط:", ""]
+        for action, target_id, actor_id, note, created_at in entries:
+            label = ACTION_LABELS.get(action, action)
+            line = f"{label} | مستخدم: {target_id or '-'} | بواسطة: {actor_id or 'النظام'} | {created_at}"
+            if note:
+                line += f" ({note})"
+            lines_list.append(line)
+        await query.edit_message_text(
+            "\n".join(lines_list),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    
+    if data == "menu_export":
+        users = get_users()
+        if not users:
+            await query.answer("لا يوجد مستخدمون لتصديرهم.", show_alert=True)
+            return
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["user_id", "username", "first_name", "added_at", "expires_at"])
+        for row in users:
+            writer.writerow(row)
+        csv_bytes = buffer.getvalue().encode("utf-8-sig")
+        filename = f"authorized_users_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=io.BytesIO(csv_bytes),
+            filename=filename,
+            caption=f"📊 تصدير {len(users)} مستخدم"
+        )
+        return
+    
+    if data == "menu_broadcast":
+        keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
+        await query.edit_message_text(
+            "📢 بث جماعي" + "\n\n" +
+            "اكتب: /broadcast <الرسالة>" + "\n\n" +
+            "مثال: /broadcast صيانة مجدولة الساعة 10 مساء" + "\n\n" +
+            "الرسالة تنزل لكل المستخدمين المصرح لهم.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
     
     if data == "menu_add":
@@ -774,6 +860,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("حذف مستخدم", callback_data="menu_remove")],
             [InlineKeyboardButton("قائمة المستخدمين", callback_data="menu_users")],
             [InlineKeyboardButton("التحقق من مستخدم", callback_data="menu_check")],
+            [InlineKeyboardButton("📋 سجل النشاط", callback_data="menu_log"),
+             InlineKeyboardButton("📊 تصدير CSV", callback_data="menu_export")],
+            [InlineKeyboardButton("📢 بث جماعي", callback_data="menu_broadcast")],
         ]
         
         text = (
