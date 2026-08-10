@@ -194,6 +194,7 @@ GOLD_PIP_VALUE = 0.01
 GOLD_PIP_USD_PER_LOT = 1.0
 
 TRADE_MONITOR_INTERVAL = 30
+PRICE_POLL_INTERVAL = 60
 NEWS_CHECK_INTERVAL = 300
 SIGNIFICANT_MOVE_PIPS = 5
 
@@ -437,6 +438,7 @@ db = {
     "news_blocked_until": 0,
     "last_price": 2650.0,
     "dxy_price": 103.0,
+    "dxy_price_last_fetch": 0,
     "session_notified": {},
     "atr_data": {"current": 0, "threshold": 15.0, "last_alert": 0},
     "equity_history": [],
@@ -1324,6 +1326,25 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("▶️ <b>تم الاستئناف</b>", parse_mode="HTML")
 
 @require_auth
+async def cmd_resetapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id) if update.effective_user else None
+    if not is_admin(user_id):
+        await update.effective_message.reply_text("⛔ هذا الامر للمشرف فقط.")
+        return
+    async with db_lock:
+        was_paused = db["twelvedata_paused_until"] > time.time()
+        db["twelvedata_paused_until"] = 0
+        db["twelvedata_pause_notified"] = False
+    await save_state()
+    if was_paused:
+        await update.effective_message.reply_text(
+            "✅ <b>تم رفع الإيقاف عن TwelveData</b>\n\nالبوت سيحاول جلب الأسعار من جديد بالدورة القادمة.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.effective_message.reply_text("ℹ️ لا يوجد إيقاف فعّال حاليًا على TwelveData.")
+
+@require_auth
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_lock: news_list = db["upcoming_news"][:5]
     if not news_list:
@@ -1669,7 +1690,16 @@ async def opportunity_analyzer_coro():
 
             current_session = get_session_name()
             current_price = await fetch_price()
-            current_dxy = await fetch_dxy_price()
+
+            async with db_lock:
+                dxy_stale = (time.time() - db["dxy_price_last_fetch"]) >= 300
+            if dxy_stale:
+                current_dxy = await fetch_dxy_price()
+                async with db_lock:
+                    db["dxy_price_last_fetch"] = time.time()
+            else:
+                async with db_lock:
+                    current_dxy = db["dxy_price"]
             should_analyze = False
             reason = ""
 
@@ -1799,7 +1829,7 @@ async def opportunity_analyzer_coro():
                         await send_msg(f"⏸️ <b>لا فرص واضحة (HOLD)</b>\nتحاليل: {count} | الجلسة: {current_session}\nالسعر: {current_price:,.2f} | DXY: {current_dxy:.2f}")
                     print(f"⏸️ [opportunity] HOLD - {reason}")
 
-            await asyncio.sleep(10)
+            await asyncio.sleep(PRICE_POLL_INTERVAL)
         except Exception as e:
             print(f"❌ خطأ opportunity_analyzer: {e}")
             await asyncio.sleep(30)
@@ -1951,6 +1981,7 @@ async def main():
     application.add_handler(CommandHandler("risk", cmd_risk))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
+    application.add_handler(CommandHandler("resetapi", cmd_resetapi))
     application.add_handler(CommandHandler("trades", cmd_trades))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CallbackQueryHandler(button_handler))
