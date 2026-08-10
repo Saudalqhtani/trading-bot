@@ -102,24 +102,15 @@ def is_authorized(user_id: str) -> bool:
         return True
 
 
-def quick_add_user(user_id: str, username: str, first_name: str, added_by: str):
-    conn = sqlite3.connect(SECURITY_DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO authorized_users (user_id, username, first_name, added_by) VALUES (?, ?, ?, ?)",
-        (str(user_id), username, first_name, str(added_by))
-    )
-    cursor.execute(
-        "INSERT INTO activity_log (action, user_id, actor_id, note) VALUES (?, ?, ?, ?)",
-        ("added", str(user_id), str(added_by), "quick-add من تنبيه بوت التداول")
-    )
-    conn.commit()
-    conn.close()
+SECURITY_BOT_TOKEN = os.environ.get("SECURITY_BOT_TOKEN")  # لإرسال تنبيهات الدخول غير المصرح عبر بوت الأمان
 
 
 async def _alert_admins_unauthorized(user_id: str, username: str, first_name: str):
-    """ينبّه كل المشرفين بمحاولة دخول غير مصرح، مع زر اضافة سريع (بحد أقصى تنبيه كل 10 دقائق لنفس المستخدم)"""
+    """ينبّه كل المشرفين عبر بوت الأمان بمحاولة دخول غير مصرح، مع زر اضافة سريع (بحد أقصى تنبيه كل 10 دقائق لنفس المستخدم)"""
     if not ADMIN_USER_IDS:
+        return
+    if not SECURITY_BOT_TOKEN:
+        print("⚠️ SECURITY_BOT_TOKEN غير مضبوط - لا يمكن ارسال تنبيه الدخول غير المصرح عبر بوت الأمان")
         return
     now = _time_sec.time()
     last = _unauth_alert_cooldown.get(user_id, 0)
@@ -128,13 +119,13 @@ async def _alert_admins_unauthorized(user_id: str, username: str, first_name: st
     _unauth_alert_cooldown[user_id] = now
 
     display_name = first_name or (f"@{username}" if username else f"مستخدم {user_id}")
-    text = f"🚨 محاولة دخول غير مصرحة\n\nالاسم: {display_name}\nالمعرف: {user_id}"
+    text = f"🚨 محاولة دخول غير مصرحة (بوت التداول)\n\nالاسم: {display_name}\nالمعرف: {user_id}"
     if username:
         text += f"\nاليوزر: @{username}"
     keyboard = [[{"text": "✅ اضافة فورية", "callback_data": f"quickadd_{user_id}"}]]
     for admin_id in ADMIN_USER_IDS:
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            url = f"https://api.telegram.org/bot{SECURITY_BOT_TOKEN}/sendMessage"
             payload = {"chat_id": admin_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}}
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -1465,35 +1456,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db["pending_signals"][signal_id]["status"] = "rejected"
         await update_signal_status(signal_id, "rejected")
         await query.edit_message_text("❌ <b>تم تجاهل الإشارة</b>")
-        return
-
-    elif data.startswith("quickadd_"):
-        actor_id = str(query.from_user.id)
-        if not is_admin(actor_id):
-            try:
-                await query.edit_message_text("⛔ هذا الزر للمشرف فقط.")
-            except Exception:
-                pass
-            return
-        target_id = data.replace("quickadd_", "")
-        if is_authorized(target_id):
-            try:
-                await query.edit_message_text(f"✅ المستخدم {target_id} مصرح مسبقًا.")
-            except Exception:
-                pass
-            return
-        quick_add_user(target_id, username=None, first_name=None, added_by=actor_id)
-        try:
-            await query.edit_message_text(f"✅ تمت اضافة المستخدم {target_id} فورًا.")
-        except Exception:
-            pass
-        try:
-            await context.bot.send_message(
-                chat_id=target_id,
-                text="✅ تم تفعيل حسابك! لديك الآن صلاحية استخدام بوت التداول. اضغط /start للبدء."
-            )
-        except Exception as e:
-            print(f"⚠️ تعذر تنبيه المستخدم {target_id}: {e}")
         return
 
     if data == "force_analysis" and is_weekend():
