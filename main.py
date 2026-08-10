@@ -27,24 +27,55 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 
 # ============ نظام الأمان ============
 import sqlite3
+import time as _time_sec
 from functools import wraps
+from datetime import datetime as _dt_sec, timezone as _tz_sec
 
 SECURITY_DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
-ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
+# يدعم عدة مشرفين: ADMIN_USER_IDS="111,222,333" (أو ADMIN_USER_ID القديم لمشرف واحد)
+_admin_raw_sec = os.environ.get("ADMIN_USER_IDS", "") or os.environ.get("ADMIN_USER_ID", "")
+ADMIN_USER_IDS = set(x.strip() for x in _admin_raw_sec.split(",") if x.strip())
+
+_unauth_alert_cooldown = {}  # user_id -> آخر وقت تم تنبيه المشرف فيه، لمنع الإزعاج المتكرر
 
 
 def init_security_db():
     os.makedirs(os.path.dirname(SECURITY_DB_PATH), exist_ok=True)
     conn = sqlite3.connect(SECURITY_DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS authorized_users (user_id TEXT PRIMARY KEY, username TEXT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by TEXT)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS authorized_users (
+            user_id TEXT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_by TEXT,
+            expires_at TIMESTAMP
+        )
+    """)
+    cursor.execute("PRAGMA table_info(authorized_users)")
+    cols = [row[1] for row in cursor.fetchall()]
+    if "expires_at" not in cols:
+        cursor.execute("ALTER TABLE authorized_users ADD COLUMN expires_at TIMESTAMP")
+    if "first_name" not in cols:
+        cursor.execute("ALTER TABLE authorized_users ADD COLUMN first_name TEXT")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            user_id TEXT,
+            actor_id TEXT,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
     print("Security DB ready")
 
 
 def is_admin(user_id: str) -> bool:
-    return str(user_id) == str(ADMIN_USER_ID)
+    return str(user_id) in ADMIN_USER_IDS
 
 
 def is_authorized(user_id: str) -> bool:
@@ -53,13 +84,63 @@ def is_authorized(user_id: str) -> bool:
     try:
         conn = sqlite3.connect(SECURITY_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM authorized_users WHERE user_id = ?", (str(user_id),))
+        cursor.execute("SELECT expires_at FROM authorized_users WHERE user_id = ?", (str(user_id),))
         result = cursor.fetchone()
         conn.close()
-        return result is not None
+        if result is None:
+            return False
+        expires_at = result[0]
+        if expires_at:
+            try:
+                if _dt_sec.fromisoformat(expires_at) <= _dt_sec.now(_tz_sec.utc).replace(tzinfo=None):
+                    return False
+            except ValueError:
+                pass
+        return True
     except Exception as e:
         print(f"Auth check error: {e}")
         return True
+
+
+def quick_add_user(user_id: str, username: str, first_name: str, added_by: str):
+    conn = sqlite3.connect(SECURITY_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO authorized_users (user_id, username, first_name, added_by) VALUES (?, ?, ?, ?)",
+        (str(user_id), username, first_name, str(added_by))
+    )
+    cursor.execute(
+        "INSERT INTO activity_log (action, user_id, actor_id, note) VALUES (?, ?, ?, ?)",
+        ("added", str(user_id), str(added_by), "quick-add من تنبيه بوت التداول")
+    )
+    conn.commit()
+    conn.close()
+
+
+async def _alert_admins_unauthorized(user_id: str, username: str, first_name: str):
+    """ينبّه كل المشرفين بمحاولة دخول غير مصرح، مع زر اضافة سريع (بحد أقصى تنبيه كل 10 دقائق لنفس المستخدم)"""
+    if not ADMIN_USER_IDS:
+        return
+    now = _time_sec.time()
+    last = _unauth_alert_cooldown.get(user_id, 0)
+    if now - last < 600:
+        return
+    _unauth_alert_cooldown[user_id] = now
+
+    display_name = first_name or (f"@{username}" if username else f"مستخدم {user_id}")
+    text = f"🚨 محاولة دخول غير مصرحة\n\nالاسم: {display_name}\nالمعرف: {user_id}"
+    if username:
+        text += f"\nاليوزر: @{username}"
+    keyboard = [[{"text": "✅ اضافة فورية", "callback_data": f"quickadd_{user_id}"}]]
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {"chat_id": admin_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    await resp.json()
+        except Exception as e:
+            print(f"❌ فشل تنبيه المشرف {admin_id}: {e}")
 
 
 def require_auth(func):
@@ -67,9 +148,10 @@ def require_auth(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Handle both direct messages and callback queries
         if update.callback_query:
-            user_id = str(update.callback_query.from_user.id)
+            tg_user = update.callback_query.from_user
         else:
-            user_id = str(update.effective_user.id)
+            tg_user = update.effective_user
+        user_id = str(tg_user.id)
 
         if not is_authorized(user_id):
             msg = (
@@ -80,6 +162,7 @@ def require_auth(func):
             )
             if update.effective_message:
                 await update.effective_message.reply_text(msg)
+            await _alert_admins_unauthorized(user_id, tg_user.username, tg_user.first_name)
             return
         return await func(update, context)
     return wrapper
@@ -1322,6 +1405,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db["pending_signals"][signal_id]["status"] = "rejected"
         await update_signal_status(signal_id, "rejected")
         await query.edit_message_text("❌ <b>تم تجاهل الإشارة</b>")
+        return
+
+    elif data.startswith("quickadd_"):
+        actor_id = str(query.from_user.id)
+        if not is_admin(actor_id):
+            try:
+                await query.edit_message_text("⛔ هذا الزر للمشرف فقط.")
+            except Exception:
+                pass
+            return
+        target_id = data.replace("quickadd_", "")
+        if is_authorized(target_id):
+            try:
+                await query.edit_message_text(f"✅ المستخدم {target_id} مصرح مسبقًا.")
+            except Exception:
+                pass
+            return
+        quick_add_user(target_id, username=None, first_name=None, added_by=actor_id)
+        try:
+            await query.edit_message_text(f"✅ تمت اضافة المستخدم {target_id} فورًا.")
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="✅ تم تفعيل حسابك! لديك الآن صلاحية استخدام بوت التداول. اضغط /start للبدء."
+            )
+        except Exception as e:
+            print(f"⚠️ تعذر تنبيه المستخدم {target_id}: {e}")
         return
 
     if data == "force_analysis" and is_weekend():
