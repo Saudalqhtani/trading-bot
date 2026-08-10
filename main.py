@@ -12,6 +12,7 @@ Gold Scalp AI Monitor v7.0 - Railway Edition (Production Ready)
 import os
 import json
 import asyncio
+from collections import deque
 import aiohttp
 import time
 import math
@@ -659,9 +660,51 @@ async def _twelvedata_paused() -> bool:
             db["twelvedata_pause_notified"] = False
         return False
 
+# ============ منظّم الطلبات + تخزين مؤقت ذكي لتقليل استهلاك رصيد TwelveData ============
+TD_MAX_PER_MINUTE = 7  # هامش أمان تحت حد الخطة (8/دقيقة)
+_td_request_times = deque()
+_td_rate_lock = asyncio.Lock()
+
+_td_cache = {}  # (symbol, interval) -> (timestamp, candles)
+_td_cache_lock = asyncio.Lock()
+_TD_CACHE_TTL = {
+    "1min": 90,     # نصف دورة الفحص (3 دقايق) تقريبا
+    "5min": 270,    # اقل من مدة الشمعة الفعلية بشوي
+    "15min": 780,
+    "30min": 1500,
+}
+
+async def _throttle_twelvedata():
+    while True:
+        async with _td_rate_lock:
+            now = time.time()
+            while _td_request_times and now - _td_request_times[0] > 60:
+                _td_request_times.popleft()
+            if len(_td_request_times) < TD_MAX_PER_MINUTE:
+                _td_request_times.append(now)
+                return
+            wait = 60 - (now - _td_request_times[0]) + 0.1
+        await asyncio.sleep(wait)
+
+
 async def fetch_tf(interval: str, symbol: str = SYMBOL):
     if await _twelvedata_paused():
         return {}
+
+    cache_key = (symbol, interval)
+    ttl = _TD_CACHE_TTL.get(interval, 60)
+    async with _td_cache_lock:
+        cached = _td_cache.get(cache_key)
+        candles = cached[1] if cached and (time.time() - cached[0]) < ttl else None
+    if candles is not None:
+        if candles:
+            current_close = float(candles[0]["close"])
+            async with db_lock:
+                if symbol == SYMBOL: db["last_price"] = current_close
+                elif symbol == DXY_SYMBOL: db["dxy_price"] = current_close
+        return candles
+
+    await _throttle_twelvedata()
     try:
         url = "https://api.twelvedata.com/time_series"
         params = {"symbol": symbol, "interval": interval, "outputsize": 20, "apikey": TWELVE_DATA_API_KEY}
@@ -676,6 +719,8 @@ async def fetch_tf(interval: str, symbol: str = SYMBOL):
                     return {}
                 if "values" in data and data["values"]:
                     candles = data["values"]
+                    async with _td_cache_lock:
+                        _td_cache[cache_key] = (time.time(), candles)
                     current_close = float(candles[0]["close"])
                     async with db_lock:
                         if symbol == SYMBOL: db["last_price"] = current_close
