@@ -2147,7 +2147,13 @@ async def opportunity_analyzer_coro():
 
                 elif signal.decision in ["BUY", "SELL"] and confidence < MIN_CONFIDENCE:
                     if elapsed >= ANALYSIS_INTERVAL:
-                        await send_msg(f"⏸️ <b>فرصة ضعيفة</b> ({signal.decision} - ثقة {confidence}%)\nالحد: {MIN_CONFIDENCE}%\nالسبب: {reason}")
+                        await send_msg(
+                            f"⏸️ <b>فرصة ضعيفة - لن تُفتح صفقة</b>\n\n"
+                            f"القرار: {signal.decision} | الثقة: {confidence}% (الحد الأدنى: {MIN_CONFIDENCE}%)\n"
+                            f"📊 لو كانت الثقة كافية، المستوى المقترح:\n"
+                            f"السعر: {signal.entry_price:,.2f} | 🛑 SL: {signal.sl_pips:.1f} | 🎯 TP1: {signal.tp1_pips:.1f}\n\n"
+                            f"💡 {signal.summary}"
+                        )
                     print(f"⏸️ [opportunity] ثقة منخفضة: {confidence}%")
 
                 else:
@@ -2322,7 +2328,7 @@ async def main():
         "━━━━━━━━━━━━━━━\n\n"
         f"⏰ الجلسة الحالية: {get_session_name()}\n\n"
         "🆕 <b>آخر التحديثات:</b>\n"
-        "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط\n"
+        "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط (توفير استهلاك API)\n"
         "• 🔐 نظام صلاحيات محسّن مع تنبيه فوري لأي دخول غير مصرح\n"
         "• 🧩 إصلاح نظام الإجماع - قرارات كانت تُفقد بالخطأ صارت تُحتسب صح\n"
         "• ⚡ حماية تلقائية من نفاذ رصيد مزوّد الأسعار اليومي\n"
