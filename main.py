@@ -36,6 +36,13 @@ SECURITY_DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 # يدعم عدة مشرفين: ADMIN_USER_IDS="111,222,333" (أو ADMIN_USER_ID القديم لمشرف واحد)
 _admin_raw_sec = os.environ.get("ADMIN_USER_IDS", "") or os.environ.get("ADMIN_USER_ID", "")
 ADMIN_USER_IDS = set(x.strip() for x in _admin_raw_sec.split(",") if x.strip())
+# يظهر للمستخدم غير المصرح كطريقة تواصل مع المشرف، مثلا: @my_username
+ADMIN_CONTACT = os.environ.get("ADMIN_CONTACT", "")
+
+def contact_admin_text() -> str:
+    if ADMIN_CONTACT:
+        return f"📩 تواصل مع المشرف: {ADMIN_CONTACT}"
+    return "📩 تواصل مع المشرف."
 
 _unauth_alert_cooldown = {}  # user_id -> آخر وقت تم تنبيه المشرف فيه، لمنع الإزعاج المتكرر
 
@@ -149,7 +156,7 @@ def require_auth(func):
             msg = (
                 "⛔ غير مصرح لك!\n\n"
                 "🔒 ليس لديك صلاحية.\n"
-                "📩 تواصل مع المشرف.\n\n"
+                f"{contact_admin_text()}\n\n"
                 "🆔 معرفك: " + user_id
             )
             if update.effective_message:
@@ -541,6 +548,13 @@ def is_weekend():
     if weekday == 6 and (hour < WEEKEND_OPEN_HOUR or (hour == WEEKEND_OPEN_HOUR and minute == 0)):
         return True
     return False
+
+def is_active_trading_session() -> bool:
+    """تقتصر على جلستي لندن ونيويورك (أو تداخلهما) فقط - يوفر طلبات TwelveData خلال طوكيو/سيدني"""
+    now = datetime.now(timezone.utc)
+    hour = now.hour + now.minute / 60
+    return (LONDON_SESSION[0] <= hour < LONDON_SESSION[1] or
+            NEW_YORK_SESSION[0] <= hour < NEW_YORK_SESSION[1])
 
 def is_valid_session():
     now = datetime.now(timezone.utc)
@@ -1048,7 +1062,7 @@ async def generate_performance_summary(period: str = "weekly"):
 ⚖️ المخاطرة: {db["risk_percent"]}%
 💵 الرصيد: {db["current_balance"]:,.2f} USD
 📈 ربح/خسارة: {(db["current_balance"] - db["initial_balance"]):+,.2f} USD
-🤖 استدعاءات Gemini اليوم: {gemini_calls}"""
+🤖 تحليلات اليوم: {gemini_calls}"""
 
 async def generate_equity_chart():
     try:
@@ -1111,14 +1125,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply = InlineKeyboardMarkup(keyboard)
     await update.effective_message.reply_text(
-        "🤖 <b>بوت الذهب الذكي v7.0</b>\n\n"
-        "✅ الميزات الجديدة:\n"
-        "• 💾 حفظ البيانات في SQLite\n"
-        "• 📋 JSON Structured Output\n"
+        "🤖 <b>بوت الذهب الذكي v7.1</b>\n\n"
+        "✅ الميزات:\n"
+        "• 💾 حفظ البيانات\n"
         "• ✅ نظام تأكيد يدوي للصفقات\n"
         "• 💰 حساب PnL صحيح للذهب\n"
         "• 🔔 اشعارات اخبار قبل 30 دقيقة\n"
-        "• 🧠 تقليل استخدام Gemini\n"
+        "• 🎯 تحليل يقتصر على جلستي لندن ونيويورك\n"
         "• 📊 تحديثات فقط عند التغيرات المهمة\n\n"
         "اختر خياراً:",
         parse_mode="HTML", reply_markup=reply
@@ -1158,7 +1171,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 المخاطرة: {risk}% | اخطاء: {errors_count}
 الاخبار: {news_status} | قادمة: {upcoming}
 ATR: {atr_current:.2f} | DXY: {dxy:.2f}
-🤖 Gemini اليوم: {gemini_calls}
+🤖 تحليلات اليوم: {gemini_calls}
 ⏱️ وقت التشغيل: {uptime_str}"""
     await update.effective_message.reply_text(msg, parse_mode="HTML")
 
@@ -1209,7 +1222,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"""📉 <b>الاحصائيات</b>
 الصفقات: {total} | ✅ {stats["wins"]} | ❌ {stats["losses"]}
 الربح: {win_rate:.1f}% | النقاط: {stats["total_pips"]:+.1f}
-التحاليل: {analysis_count} | Gemini اليوم: {gemini_calls}
+التحاليل: {analysis_count} | تحليلات اليوم: {gemini_calls}
 💵 الرصيد: {balance:,.2f} USD
 📈 ربح/خسارة: {(balance - initial):+,.2f} USD
 {recent_trades}"""
@@ -1692,8 +1705,8 @@ async def opportunity_analyzer_coro():
             if await is_news_blocking():
                 await asyncio.sleep(60)
                 continue
-            if not is_valid_session():
-                await asyncio.sleep(60)
+            if not is_active_trading_session():
+                await asyncio.sleep(180)
                 continue
 
             current_session = get_session_name()
@@ -1771,7 +1784,7 @@ async def opportunity_analyzer_coro():
                             "⚠️ <b>إجماع ضعيف - لا إشارة</b>",
                             f"القرار: {signal.decision}",
                             f"الثقة: {confidence}% (الحد: {MIN_CONFIDENCE}%)",
-                            "🦙 Groq متردد → انتظر فرصة أوضح"
+                            "💡 توافق جزئي فقط → انتظر فرصة أوضح"
                         ]
                         await send_msg("\n".join(msg_lines))
                         async with db_lock:
@@ -1909,7 +1922,7 @@ async def report_coro():
             f"المخاطرة: {risk}%\n"
             f"الرصيد: {balance:,.2f} USD\n"
             f"ربح/خسارة: {(balance - initial):+,.2f} USD\n"
-            f"🤖 استدعاءات Gemini: {gemini_calls}"
+            f"🤖 عدد التحليلات: {gemini_calls}"
         )
 
 async def session_coro():
@@ -2000,17 +2013,20 @@ async def main():
 
     print("🚀 البوت يعمل!")
     await send_msg(
-        f"🚀 <b>بوت الذهب يعمل! v7.0</b>\n\n"
-        f"⏰ الجلسة: {get_session_name()}\n"
-        f"🤖 النموذج الرئيسي: {GEMINI_MODEL}\n"
-        f"🦙 نموذج التأكيد: {GROQ_MODEL} (مجاني)\n"
-        f"✅ نظام الإجماع: Gemini + Groq\n"
-        f"💾 حفظ البيانات في SQLite\n"
-        f"✅ نظام تأكيد يدوي للصفقات\n"
-        f"💰 حساب PnL صحيح للذهب\n"
-        f"🔔 اشعارات اخبار قبل 30 دقيقة\n"
-        f"🧠 تقليل استخدام Gemini\n\n"
-        f"استخدم /force لتحليل فوري"
+        "🚀 <b>بوت الذهب يعمل! v7.1</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"⏰ الجلسة الحالية: {get_session_name()}\n\n"
+        "🆕 <b>آخر التحديثات:</b>\n"
+        "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط (توفير استهلاك API)\n"
+        "• 🔐 نظام صلاحيات محسّن مع تنبيه فوري لأي دخول غير مصرح\n"
+        "• 🧩 إصلاح نظام الإجماع - قرارات كانت تُفقد بالخطأ صارت تُحتسب صح\n"
+        "• ⚡ حماية تلقائية من نفاذ رصيد مزوّد الأسعار اليومي\n"
+        "• 🐢 تقليل عدد الطلبات لتفادي أي انقطاع بالخدمة\n\n"
+        "📋 <b>الأوامر الأساسية:</b>\n"
+        "/start - القائمة الرئيسية\n"
+        "/force - تحليل فوري يدوي\n"
+        "/status - حالة البوت\n"
+        "/help - كل الأوامر\n"
     )
 
     tasks = [
