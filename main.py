@@ -396,8 +396,9 @@ class TradeSignal:
             return False
         if self.sl_pips <= 0:
             return False
-        if self.confidence < MIN_CONFIDENCE:
-            return False
+        # ملاحظة: لا نرفض هنا بسبب انخفاض الثقة الفردية - رأي نموذج واحد بثقة أقل من الحد
+        # قد يتفق مع النموذج الثاني ويرتفع بعد الإجماع فوق الحد. الفحص النهائي يصير
+        # على الثقة بعد الإجماع في opportunity_analyzer_coro.
         return True
 
     def to_dict(self) -> dict:
