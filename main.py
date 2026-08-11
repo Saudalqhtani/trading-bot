@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 # ============ نظام الأمان ============
 import sqlite3
@@ -440,6 +440,8 @@ async def save_state():
             "last_session_analysis": db["last_session_analysis"],
             "twelvedata_paused_until": str(db["twelvedata_paused_until"]),
             "twelvedata_pause_notified": str(int(db["twelvedata_pause_notified"])),
+            "gemini_paused_until": str(db["gemini_paused_until"]),
+            "gemini_pause_notified": str(int(db["gemini_pause_notified"])),
         }
         for key, value in state_data.items():
             cursor.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, value))
@@ -467,6 +469,8 @@ async def load_state():
             elif key == "last_session_analysis": db["last_session_analysis"] = value
             elif key == "twelvedata_paused_until": db["twelvedata_paused_until"] = float(value)
             elif key == "twelvedata_pause_notified": db["twelvedata_pause_notified"] = bool(int(value))
+            elif key == "gemini_paused_until": db["gemini_paused_until"] = float(value)
+            elif key == "gemini_pause_notified": db["gemini_pause_notified"] = bool(int(value))
         cursor.execute("SELECT * FROM trades ORDER BY created_at DESC")
         trades = cursor.fetchall()
         columns = [c[0] for c in cursor.description]
@@ -582,6 +586,8 @@ db = {
     "last_analysis_ts": 0,
     "twelvedata_paused_until": 0,
     "twelvedata_pause_notified": False,
+    "gemini_paused_until": 0,
+    "gemini_pause_notified": False,
     "risk_percent": 1.0,
     "news_blocked_until": 0,
     "last_price": 2650.0,
@@ -972,7 +978,32 @@ async def fetch_all_tf():
 
 # ============ تحليل الذكاء الاصطناعي ============
 
+async def _mark_gemini_exhausted(message: str):
+    async with db_lock:
+        already_notified = db["gemini_pause_notified"]
+        db["gemini_paused_until"] = _next_utc_midnight_ts()
+        db["gemini_pause_notified"] = True
+    if not already_notified:
+        await send_msg(
+            "⛔ <b>نفذ رصيد Gemini اليومي</b>\n\n"
+            f"{message}\n\n"
+            "تم إيقاف استدعاء Gemini تلقائيًا حتى تصفير الرصيد، والنظام سيعمل بـ Groq فقط مؤقتًا (بدون تأكيد ثنائي)."
+        )
+
+async def _gemini_paused() -> bool:
+    async with db_lock:
+        paused_until = db["gemini_paused_until"]
+        if paused_until and time.time() < paused_until:
+            return True
+        if paused_until and time.time() >= paused_until:
+            db["gemini_paused_until"] = 0
+            db["gemini_pause_notified"] = False
+        return False
+
+
 async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional[TradeSignal]:
+    if await _gemini_paused():
+        return None
     try:
         async with db_lock:
             db["last_gemini_call"] = time.time()
@@ -1002,6 +1033,8 @@ async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional
                 if "error" in result:
                     err_msg = result["error"].get("message", "Unknown Gemini error")
                     print(f"❌ Gemini API خطأ: {err_msg}")
+                    if "exceeded your current quota" in err_msg.lower():
+                        await _mark_gemini_exhausted(err_msg)
                     return None
 
                 if "candidates" not in result or not result["candidates"]:
@@ -1115,8 +1148,15 @@ async def consensus_analysis(tf_data: dict, dxy_price: float):
 
     gemini_signal = await analyze_gemini_structured(tf_data, dxy_price)
     if gemini_signal is None:
-        print("⚠️ [consensus] Gemini فشل")
-        return None, "GEMINI_FAIL", 0
+        print("⚠️ [consensus] Gemini فشل - تجربة Groq فقط كاحتياطي")
+        groq_signal = await analyze_groq_structured(tf_data, dxy_price)
+        if groq_signal is None:
+            print("⚠️ [consensus] Groq فشل ايضا")
+            return None, "BOTH_FAIL", 0
+        reduced_confidence = max(50, groq_signal.confidence - 15)
+        print(f"🦙 [consensus] Groq فقط (احتياطي): {groq_signal.decision} | ثقة مخفضة: {reduced_confidence}%")
+        groq_signal.confidence = reduced_confidence
+        return groq_signal, "GROQ_ONLY", reduced_confidence
 
     print(f"🤖 [consensus] Gemini: {gemini_signal.decision} (ثقة {gemini_signal.confidence}%)")
 
@@ -1558,16 +1598,32 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.effective_message.reply_text(f"📊 مخاطرتك: <code>{account['risk_percent']}%</code>", parse_mode="HTML")
 
+_awaiting_balance_input = set()  # user_ids currently being asked "كم رصيدك؟"
+
+async def _apply_new_balance(user_id: str, new_balance: float):
+    account = await get_user_account(user_id)
+    account["balance"] = new_balance
+    account["initial_balance"] = new_balance
+    account["equity_history"] = [{"date": datetime.now(timezone.utc).isoformat(), "balance": new_balance}]
+    await save_user_account(user_id, account)
+
+async def _start_balance_flow(message, user_id: str):
+    account = await get_user_account(user_id)
+    if account["active_trade"]:
+        await message.reply_text("⚠️ لا يمكن تغيير الرصيد وعندك صفقة نشطة. أغلقها أولاً.")
+        return
+    _awaiting_balance_input.add(user_id)
+    await message.reply_text(
+        f"💵 رصيدك الحالي: <code>{account['balance']:,.2f}</code> USD\n\n"
+        "كم رصيدك الجديد؟ اكتب الرقم فقط (مثال: 5000)",
+        parse_mode="HTML"
+    )
+
 @require_auth
 async def cmd_setbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if not context.args:
-        account = await get_user_account(user_id)
-        await update.effective_message.reply_text(
-            f"💵 رصيدك الحالي: <code>{account['balance']:,.2f}</code> USD\n\n"
-            "لتغييره: <code>/setbalance 5000</code>",
-            parse_mode="HTML"
-        )
+        await _start_balance_flow(update.effective_message, user_id)
         return
     try:
         new_balance = float(context.args[0])
@@ -1583,13 +1639,35 @@ async def cmd_setbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ لا يمكن تغيير الرصيد وعندك صفقة نشطة. أغلقها أولاً.")
         return
 
-    account["balance"] = new_balance
-    account["initial_balance"] = new_balance
-    account["equity_history"] = [{"date": datetime.now(timezone.utc).isoformat(), "balance": new_balance}]
-    await save_user_account(user_id, account)
+    await _apply_new_balance(user_id, new_balance)
     await update.effective_message.reply_text(
         f"✅ <b>تم تحديد رصيدك:</b> <code>{new_balance:,.2f}</code> USD",
         parse_mode="HTML"
+    )
+
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in _awaiting_balance_input:
+        return
+    if not is_authorized(user_id):
+        return
+    text = (update.effective_message.text or "").strip().replace(",", "")
+    try:
+        amount = float(text)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text("❌ اكتب رقم صحيح أكبر من صفر (مثال: 5000)")
+        return
+
+    _awaiting_balance_input.discard(user_id)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ حفظ", callback_data=f"confirmbalance_{amount}"),
+        InlineKeyboardButton("❌ إلغاء", callback_data="cancelbalance"),
+    ]])
+    await update.effective_message.reply_text(
+        f"تأكيد: رصيدك الجديد <code>{amount:,.2f}</code> USD؟",
+        parse_mode="HTML", reply_markup=keyboard
     )
 
 @require_auth
@@ -1796,20 +1874,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_state()
         await query.message.reply_text("▶️ تم الاستئناف")
     elif data == "menu_setbalance":
+        await _start_balance_flow(query.message, str(query.from_user.id))
+    elif data.startswith("confirmbalance_"):
         user_id = str(query.from_user.id)
+        try:
+            amount = float(data.replace("confirmbalance_", ""))
+        except ValueError:
+            await query.edit_message_text("❌ حدث خطأ، حاول من جديد.")
+            return
         account = await get_user_account(user_id)
         if account["active_trade"]:
-            await query.message.reply_text(
-                f"💵 رصيدك الحالي: <code>{account['balance']:,.2f}</code> USD\n\n"
-                "⚠️ ما تقدر تغيّره وعندك صفقة نشطة، أغلقها أولاً.",
-                parse_mode="HTML"
-            )
-        else:
-            await query.message.reply_text(
-                f"💵 رصيدك الحالي: <code>{account['balance']:,.2f}</code> USD\n\n"
-                "لتغييره اكتب: <code>/setbalance 5000</code>",
-                parse_mode="HTML"
-            )
+            await query.edit_message_text("⚠️ عندك صفقة نشطة الآن، ما تقدر تغيّر الرصيد. أغلقها أولاً.")
+            return
+        await _apply_new_balance(user_id, amount)
+        await query.edit_message_text(f"✅ <b>تم حفظ رصيدك:</b> <code>{amount:,.2f}</code> USD", parse_mode="HTML")
+    elif data == "cancelbalance":
+        await query.edit_message_text("❌ تم الإلغاء - رصيدك لم يتغيّر.")
 
 async def _monitor_one_user_trade(uid: str, current_price: float):
     account = await get_user_account(uid)
@@ -2224,6 +2304,7 @@ async def main():
     application.add_handler(CommandHandler("news", cmd_news))
     application.add_handler(CommandHandler("risk", cmd_risk))
     application.add_handler(CommandHandler("setbalance", cmd_setbalance))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("resetapi", cmd_resetapi))
