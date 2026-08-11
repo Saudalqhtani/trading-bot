@@ -632,6 +632,30 @@ async def send_msg_with_buttons(text: str, keyboard: list):
     except Exception as e:
         print(f"❌ فشل ارسال Telegram مع أزرار: {e}")
 
+def quick_action_keyboard_raw() -> list:
+    """أزرار سريعة بصيغة dict خام (لاستخدامها مع send_msg_with_buttons)"""
+    row1 = [
+        {"text": "🏠 القائمة الرئيسية", "callback_data": "menu_start"},
+        {"text": "📊 حالة البوت", "callback_data": "status"},
+    ]
+    if ADMIN_CONTACT:
+        row2 = [{"text": "❓ Help", "url": f"https://t.me/{ADMIN_CONTACT.lstrip('@').strip()}"}]
+    else:
+        row2 = [{"text": "❓ Help", "callback_data": "help_cmd"}]
+    return [row1, row2]
+
+def quick_action_keyboard() -> InlineKeyboardMarkup:
+    """نفس الأزرار السريعة بصيغة InlineKeyboardMarkup (لاستخدامها مع reply_markup مباشرة)"""
+    row1 = [
+        InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="menu_start"),
+        InlineKeyboardButton("📊 حالة البوت", callback_data="status"),
+    ]
+    if ADMIN_CONTACT:
+        row2 = [InlineKeyboardButton("❓ Help", url=f"https://t.me/{ADMIN_CONTACT.lstrip('@').strip()}")]
+    else:
+        row2 = [InlineKeyboardButton("❓ Help", callback_data="help_cmd")]
+    return InlineKeyboardMarkup([row1, row2])
+
 async def send_photo(photo_path: str, caption: str = ""):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -1120,7 +1144,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📈 الاشارة", callback_data="signal"), InlineKeyboardButton("📉 الاحصائيات", callback_data="stats")],
         [InlineKeyboardButton("📊 اسبوعي", callback_data="weekly"), InlineKeyboardButton("📊 شهري", callback_data="monthly")],
         [InlineKeyboardButton("📈 رسم الرصيد", callback_data="equity_chart"), InlineKeyboardButton("⚡ ATR", callback_data="atr")],
-        [InlineKeyboardButton("🔍 اخطاء", callback_data="errors"), InlineKeyboardButton("🔄 تحليل فوري", callback_data="force_analysis")],
+        [InlineKeyboardButton("🔍 اخطاء", callback_data="errors")],
         [InlineKeyboardButton("⏸️ ايقاف", callback_data="pause"), InlineKeyboardButton("▶️ استئناف", callback_data="resume")],
     ]
     reply = InlineKeyboardMarkup(keyboard)
@@ -1531,7 +1555,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "status": cmd_status, "price": cmd_price, "signal": cmd_signal,
         "stats": cmd_stats, "weekly": cmd_weekly, "monthly": cmd_monthly,
         "equity_chart": cmd_equity_chart, "atr": cmd_atr,
-        "errors": cmd_errors, "force_analysis": cmd_force_analysis,
+        "errors": cmd_errors, "menu_start": cmd_start, "help_cmd": cmd_help,
     }
     if data in handlers:
         try:
@@ -2012,21 +2036,17 @@ async def main():
     await application.updater.start_polling(drop_pending_updates=True)
 
     print("🚀 البوت يعمل!")
-    await send_msg(
+    await send_msg_with_buttons(
         "🚀 <b>بوت الذهب يعمل! v7.1</b>\n"
         "━━━━━━━━━━━━━━━\n\n"
         f"⏰ الجلسة الحالية: {get_session_name()}\n\n"
         "🆕 <b>آخر التحديثات:</b>\n"
-        "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط (توفير استهلاك API)\n"
+        "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط\n"
         "• 🔐 نظام صلاحيات محسّن مع تنبيه فوري لأي دخول غير مصرح\n"
         "• 🧩 إصلاح نظام الإجماع - قرارات كانت تُفقد بالخطأ صارت تُحتسب صح\n"
         "• ⚡ حماية تلقائية من نفاذ رصيد مزوّد الأسعار اليومي\n"
-        "• 🐢 تقليل عدد الطلبات لتفادي أي انقطاع بالخدمة\n\n"
-        "📋 <b>الأوامر الأساسية:</b>\n"
-        "/start - القائمة الرئيسية\n"
-        "/force - تحليل فوري يدوي\n"
-        "/status - حالة البوت\n"
-        "/help - كل الأوامر\n"
+        "• 🐢 تقليل عدد الطلبات لتفادي أي انقطاع بالخدمة\n",
+        quick_action_keyboard_raw()
     )
 
     tasks = [
@@ -2043,4 +2063,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
