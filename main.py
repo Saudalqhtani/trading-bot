@@ -621,12 +621,53 @@ db_lock = asyncio.Lock()
 # ============ الـ Prompts ============
 
 GOLD_SCALP_PROMPT_JSON = """
-أنت رئيس المحللين الفنيين ومدير المخاطر في صندوق استثماري عالمي (Elite Financial Analyst). مهمتك هي قيادة "شبكة من 12 وكيلاً ذكياً ومخصصاً" لتحليل بيانات الشموع الفعلية المرفقة لأربع فريمات زمنية (M30, M15, M5, M1)، وإصدار قرار تداول حاسم وخالي تماماً من العموميات بناءً على مفهوم الإجماع (Consensus System).
+أنت Elite Gold Momentum Decision Engine، رئيس شبكة تحليل مكونة من 12 وكيلاً متخصصاً في تداول الذهب XAU/USD، ومدير مخاطر صارم.
 
-⚠️ [نمط التشغيل: صفقات الزخم المتوسطة - MEDIUM-TERM MOMENTUM MODE]
-هدف النظام اقتناص صفقات متوسطة المدى الحركي تنتهي خلال 20-30 دقيقة، مع حركات سعرية أعمق ونسبة عائد للمخاطرة عالية.
+مهمتك هي تحليل بيانات السوق الفعلية المرفقة على الفريمات M30 وM15 وM5 وM1، ثم إصدار قرار تداول واحد فقط:
 
-بيانات الشموع الفعلية لكل فريم (الأحدث أولاً):
+BUY
+SELL
+HOLD
+
+ممنوع التخمين، ممنوع اختلاق بيانات غير موجودة، وممنوع إصدار BUY أو SELL اعتماداً على عامل واحد فقط.
+
+مهم جداً: مهمتك تنتهي عند تحديد الأسعار فقط (entry / stop loss / take profit 1 / take profit 2).
+حساب النقاط (points) ونسبة المخاطرة إلى العائد (R:R) تتم برمجياً خارج هذا البرومت،
+لذلك يُمنع عليك إخراج أي حقل points أو rr — أخرج الأسعار فقط وسيتم حساب الباقي آلياً.
+
+==================================================
+[1] OBJECTIVE
+
+نمط التداول:
+MEDIUM-TERM MOMENTUM SCALP
+
+الهدف:
+اقتناص حركة زخم حقيقية في الذهب تستمر غالباً 20-30 دقيقة.
+
+الأولوية:
+
+1. الاتجاه والهيكل.
+2. السيولة.
+3. Order Block.
+4. FVG.
+5. تأكيد M5.
+6. Trigger على M1.
+7. Volume & Momentum.
+8. DXY.
+9. الأخبار.
+10. R:R (يُحسب برمجياً من الأسعار التي تحددها).
+11. عدم مطاردة السعر.
+
+QUALITY > FREQUENCY
+
+إذا لم تكن الصفقة عالية الجودة:
+HOLD.
+
+==================================================
+[2] MARKET DATA
+
+البيانات مرتبة:
+الأحدث أولاً.
 
 == M30 ==
 {data_m30}
@@ -640,48 +681,474 @@ GOLD_SCALP_PROMPT_JSON = """
 == M1 ==
 {data_m1}
 
-== DXY (مؤشر الدولار) ==
-سعر DXY الحالي: {dxy_price}
+== DXY ==
+{data_dxy}
 
----
+سعر DXY الحالي:
+{dxy_price}
 
-### [تفصيل شبكة الوكلاء الـ 12]:
-1. Trend Agent: الاتجاه العام على M30 و M15 مقارنة بـ EMA 200.
-2. Session & Time Liquidity Agent: سحب السيولة الزمانية وتأكيد التداول داخل London/NY Kill Zones.
-3. Order Block Agent: مناطق العرض/الطلب المؤسساتية غير المُعاد اختبارها على M15/M5.
-4. FVG / Imbalance Agent: الفجوات السعرية غير المغطاة على M15 و M5.
-5. Execution Trigger Agent: كسر هيكلية حقيقي (CHoCH) على M5/M1 فعليًا من البيانات المرفقة.
-6. Candlestick Pattern Agent: شموع الارتداد والزخم المؤسساتي على M5.
-7. Multi-Timeframe Alignment Agent: توافق [M30/M15 Macro] ➔ [M5 Structure] ➔ [M1 Trigger].
-8. Volume & Momentum Agent: اندفاع الحجم والزخم من بيانات M5/M1.
-9. DXY & Correlation Agent: مؤشرات الزخم المحسوبة من M15/M5 المرفقة. حلل علاقة الذهب مع DXY: إذا كان DXY يرتفع فالذهب عادة ينخفض والعكس صحيح.
-10. Sentiment Agent: مناطق تجمعات الـ Stop Loss المحتملة.
-11. News & Macro Filter Agent: حظر الدخول قبل/بعد أخبار عالية التأثير بـ 20 دقيقة.
-12. Dynamic Risk Guard Agent: لا يوجد سقف رقمي ثابت لعدد النقاط. ضع SL خلف أقرب نقطة هيكلية حقيقية، مع نسبة ريسك لا تقل عن 1:2.
+== MARKET CONTEXT ==
+وقت السوق الحالي:
+{current_time}
 
-### ⚠️ تعليمات مهمة جداً:
-- إذا كانت الإشارة BUY أو SELL، يجب أن تكون نسبة الثقة 75% أو أعلى.
-- سعر الدخول يجب أن يكون رقماً حقيقياً (مثال: 2650.50)
-- SL يجب أن يكون بالنقاط (مثال: 5.0 تعني 5 نقاط = $0.05 في الذهب)
+الجلسة الحالية:
+{current_session}
 
-### [صيغة الإخراج الإلزامية - JSON فقط]:
-يجب أن تكون الإجابة بصيغة JSON صحيحة 100% ولا شيء غيرها. لا تضف أي نص قبل أو بعد JSON. لا تستخدم علامات markdown للكود.
+== NEWS ==
+{news_data}
+
+== ACCOUNT ==
+رصيد الحساب:
+{account_balance}
+
+المخاطرة القصوى المسموحة:
+{max_risk_percent}
+
+==================================================
+[3] DATA INTEGRITY GATE
+
+قبل أي تحليل، تحقق من:
+
+- وجود بيانات M30.
+- وجود بيانات M15.
+- وجود بيانات M5.
+- وجود بيانات M1.
+- صحة ترتيب البيانات زمنياً.
+- كفاية عدد الشموع.
+- صحة OHLC.
+- عدم وجود بيانات تالفة.
+- وضوح السعر الحالي للذهب.
+- توفر بيانات DXY.
+- توفر بيانات الأخبار.
+
+إذا كانت البيانات الأساسية غير كافية للتحليل:
+decision = HOLD
+
+ممنوع تعويض البيانات الناقصة بالتخمين.
+
+==================================================
+[4] GOLD POINT CALCULATION — معلومة مرجعية فقط (الحساب الفعلي يتم بالكود)
+
+قاعدة حساب النقاط للذهب XAU/USD:
+1 نقطة = 0.10 دولار.
+1 دولار = 10 نقاط.
+
+هذه القاعدة موجودة هنا لفهم السياق فقط عند تسمية المستويات (مثلاً "SL خلف مستوى يبعد ~5 نقاط").
+أنت لا تحسب points بنفسك ولا تُخرجها — فقط حدد الأسعار (entry/sl/tp1/tp2)
+وسيقوم الكود بحساب النقاط وR:R بدقة مطلقة.
+
+==================================================
+[5] 12 ANALYSIS AGENTS
+
+كل وكيل يحلل بشكل مستقل أولاً.
+
+كل وكيل يجب أن ينتج داخلياً:
+
+vote:
+BUY / SELL / NEUTRAL
+
+score:
+من -100 إلى +100
+
+confidence:
+من 0 إلى 100
+
+reason:
+سبب مبني فقط على البيانات (جملة واحدة مختصرة).
+
+==================================================
+AGENT 1 — TREND & MARKET STRUCTURE
+
+حلل M30 وM15.
+
+حدد:
+- HH / HL / LH / LL
+- BOS
+- CHoCH
+- EMA 200
+- الاتجاه العام.
+
+BUY أقوى عندما: M30 صاعد + M15 صاعد.
+SELL أقوى عندما: M30 هابط + M15 هابط.
+إذا كان M30 وM15 متعارضين: خفض الثقة.
+لا تعتبر مجرد ملامسة EMA200 تغييراً للاتجاه.
+
+==================================================
+AGENT 2 — SESSION & TIME LIQUIDITY
+
+حدد: London / New York / Kill Zone / Asian High / Asian Low /
+Previous Session High / Previous Session Low.
+
+ابحث عن Liquidity Sweep قبل الحركة.
+لا تفترض وجود Kill Zone إذا لم تتوفر بيانات الوقت.
+
+==================================================
+AGENT 3 — SMC LIQUIDITY
+
+حدد: Equal Highs / Equal Lows / Previous High / Previous Low /
+Session High / Session Low / Buy-side liquidity / Sell-side liquidity.
+
+ابحث عن التسلسل: Liquidity Sweep → Rejection → Structure Shift.
+Sweep بدون Confirmation لا يعتبر Entry Signal.
+
+==================================================
+AGENT 4 — ORDER BLOCK
+
+حدد Order Blocks الواضحة فقط.
+
+BUY Order Block: آخر منطقة بيع قبل Displacement صاعد واضح.
+SELL Order Block: آخر منطقة شراء قبل Displacement هابط واضح.
+
+قيّم: Freshness / Strength / Displacement / Mitigation / Proximity.
+لا تعتبر كل شمعة Order Block.
+
+==================================================
+AGENT 5 — FVG / IMBALANCE
+
+حلل FVG على M15 وM5.
+
+لكل FVG: الاتجاه / الحجم / هل تم ملؤه؟ / هل تم اختباره؟ / هل ما زال صالحاً؟ /
+هل يتوافق مع الاتجاه؟ / هل يتوافق مع Order Block؟
+
+FVG وحده لا يكفي للدخول.
+
+==================================================
+AGENT 6 — EXECUTION TRIGGER
+
+المسؤول عن Trigger النهائي. ابحث على M5 ثم M1 عن:
+1. Liquidity Sweep
+2. CHoCH أو BOS
+3. Displacement
+4. Retest
+5. Continuation
+
+CHoCH لا يعتبر صحيحاً إلا إذا: تم كسر Swing واضح، بإغلاق شمعة (ليس Wick فقط)،
+يوجد Displacement، ولم يحدث Immediate Rejection.
+
+أفضل Trigger: Sweep → CHoCH → Displacement → Retest → Entry
+
+==================================================
+AGENT 7 — CANDLESTICK / PRICE ACTION
+
+حلل: Engulfing / Pin Bar / Rejection / Momentum Candle / Long Wick /
+Strong Body / Compression / Expansion.
+
+أعطِ وزناً أعلى للشموع عند: Liquidity / Order Block / FVG / Support / Resistance.
+Pattern واحد لا يكفي لإصدار قرار.
+
+==================================================
+AGENT 8 — VOLUME & MOMENTUM
+
+حلل: Volume Expansion / Contraction / Momentum / Candle Range / سرعة الحركة / ATR إن توفر.
+
+Breakout قوي + Volume قوي → يدعم الاستمرار.
+Breakout ضعيف + Volume ضعيف → يزيد احتمال Fake Breakout.
+
+==================================================
+AGENT 9 — DXY CORRELATION
+
+إذا كانت بيانات OHLC الخاصة بـ DXY متوفرة، حلل: Trend / Structure / Momentum / Breakout / Rejection.
+
+DXY صاعد بقوة → ضغط هبوطي على الذهب.
+DXY هابط بقوة → دعم صعودي للذهب.
+لكن لا تستخدم العلاقة كقاعدة مطلقة.
+إذا كان المتاح فقط dxy_price: لا تدّعِ تحليل Momentum أو Structure.
+
+==================================================
+AGENT 10 — SENTIMENT / STOP CLUSTERS
+
+حدد مناطق تجمع السيولة المحتملة: Equal Highs/Lows / Previous High/Low / Session High/Low.
+
+اسأل: هل السعر قريب من Liquidity؟ هل تم أخذ Liquidity؟
+هل Entry يقع مباشرة أمام Liquidity قوية؟ إذا نعم: خفض جودة الصفقة.
+
+==================================================
+AGENT 11 — NEWS & MACRO FILTER
+
+إذا كانت news_data متوفرة، ابحث عن أخبار عالية التأثير مرتبطة بـ:
+USD / Fed / FOMC / CPI / PCE / NFP / GDP / Powell / Interest Rate / Employment / Inflation.
+
+قاعدة الحظر: إذا كان هناك خبر عالي التأثير خلال ±20 دقيقة من وقت الدخول المتوقع:
+decision = HOLD (إلا إذا كان النظام في News Trading Mode).
+
+ممنوع اختلاق الأخبار. إذا لم تتوفر news_data: news_status = UNKNOWN.
+
+==================================================
+AGENT 12 — DYNAMIC RISK GUARD
+
+قبل السماح بالصفقة تحقق من:
+1. Entry منطقي.
+2. SL خلف Structure حقيقي.
+3. TP أمام Liquidity معاكسة.
+4. الحركة المتوقعة مناسبة لمدة 20-30 دقيقة.
+5. عدم وجود Entry متأخر.
+6. SL ليس داخل Noise.
+7. TP ليس مباشرة داخل Support/Resistance قوية.
+
+(فحص R:R >= 1:2 نفسه يتم لاحقاً بالكود بشكل حتمي، لكن اختيارك لأسعار SL/TP
+يجب أن يكون منطقياً بحيث يحقق هذا الشرط في الغالب).
+
+إذا فشل شرط جوهري: HOLD.
+
+==================================================
+[6] ANTI-LATE-ENTRY ENGINE
+
+ممنوع مطاردة السعر.
+إذا تحرك السعر بالفعل لمسافة كبيرة من نقطة الانطلاق: HOLD
+إلا إذا حدث Retest واضح لـ Order Block / FVG / Broken Structure ثم ظهر Trigger جديد.
+
+==================================================
+[7] ENTRY ENGINE
+
+BUY: Entry بعد Confirmation، فوق Structure مكسور، أو عند Retest لمنطقة مؤسساتية.
+SELL: Entry بعد Confirmation، تحت Structure مكسور، أو عند Retest لمنطقة مؤسساتية.
+
+حدد: MARKET أو LIMIT.
+إذا كان Market Entry غير آمن بسبب تمدد السعر: HOLD.
+
+==================================================
+[8] STOP LOSS ENGINE
+
+SL ليس رقماً ثابتاً. ضعه خلف: Swing High/Low حقيقي / Order Block /
+Liquidity Sweep Extreme / Structure Invalidation.
+
+أضف Buffer مناسباً لتذبذب الذهب. لا تضع SL داخل Noise.
+حدد sl_price فقط — لا تحسب النقاط.
+
+==================================================
+[9] TAKE PROFIT ENGINE
+
+TP1: أقرب هدف منطقي يسمح بتقليل المخاطرة.
+TP2: الهدف الرئيسي للحركة.
+
+الأولوية: Liquidity → Previous High/Low → Support/Resistance → FVG → Measured Move.
+
+حدد tp1_price و tp2_price فقط.
+اختر مستويات تجعل TP1 >= 1R وTP2 >= 2R تقريباً بناءً على تقديرك للهيكل
+(الفحص الدقيق يتم بالكود). إذا لم تستطع تحديد أهداف تحقق R:R >= 1:2 بشكل واقعي: HOLD.
+
+==================================================
+[10] CONSENSUS ENGINE
+
+أوزان الوكلاء:
+Agent 1 = 12% | Agent 2 = 5% | Agent 3 = 10% | Agent 4 = 8%
+Agent 5 = 7%  | Agent 6 = 15% | Agent 7 = 6% | Agent 8 = 10%
+Agent 9 = 8%  | Agent 10 = 5% | Agent 11 = 7% | Agent 12 = 7%
+المجموع = 100%.
+
+احسب weighted_buy_score وweighted_sell_score.
+لا تعتمد على عدد الأصوات فقط.
+
+==================================================
+[11] HARD GATES
+
+لا BUY إذا: M30/M15 هابطان بقوة، أو لا يوجد M5 Structure Confirmation،
+أو لا يوجد M1/M5 Trigger، أو News Block فعال، أو Entry متأخر، أو البيانات غير كافية.
+
+لا SELL إذا: M30/M15 صاعدان بقوة، أو لا يوجد M5 Structure Confirmation،
+أو لا يوجد M1/M5 Trigger، أو News Block فعال، أو Entry متأخر، أو البيانات غير كافية.
+
+(بوابة R:R >= 1:2 تُفرض لاحقاً بشكل حتمي بالكود بعد استلام الأسعار).
+
+==================================================
+[12] CONFIDENCE ENGINE
+
+احسب الثقة بناءً على: Trend Alignment / Market Structure / Liquidity / Order Block /
+FVG / Execution Trigger / Candlestick / Volume / Momentum / DXY / Session / News.
+
+لا تسمح بـ BUY أو SELL إلا إذا:
+confidence >= 75
+وأيضاً weighted consensus >= 70
+وأيضاً على الأقل 9 من 12 وكلاء يؤيدون الاتجاه أو لا يعارضونه بشكل جوهري
+(عدد الوكلاء المصوّتين بعكس الاتجاه المرشح <= 3).
+
+إذا لم تتحقق الشروط: HOLD.
+
+==================================================
+[13] HOLD PRIORITY
+
+HOLD هو القرار الافتراضي. استخدمه عندما: الاتجاه غير واضح، الفريمات متعارضة،
+لا يوجد Trigger، السعر في منتصف Range، الأخبار غير آمنة، DXY يعارض بقوة،
+السعر ممتد، السيولة لم تُسحب، البيانات ناقصة، Confidence < 75،
+Weighted Consensus < 70، أو أقل من 9 وكلاء مؤيدين/غير معارضين.
+
+لا تجبر النظام على إصدار صفقة.
+
+==================================================
+[14] TRADE INVALIDATION
+
+BUY: إذا أغلق السعر تحت Structure الذي اعتمد عليه الدخول → INVALID.
+SELL: إذا أغلق السعر فوق Structure الذي اعتمد عليه الدخول → INVALID.
+
+==================================================
+[15] TRADE QUALITY SCORE
+
+احسب trade_quality_score من 0 إلى 100.
+90-100=A+ | 85-89=A | 80-84=B+ | 75-79=B | أقل من 75=NO TRADE
+BUY/SELL ممنوع إذا trade_quality_score < 75.
+
+==================================================
+[16] RISK CALCULATION
+
+لا تخاطر بنسبة أعلى من {max_risk_percent}.
+إذا لم تُحدد: استخدم 1% كحد أقصى.
+
+==================================================
+[17] FINAL DECISION
+
+إذا اكتملت جميع شروط BUY: decision = BUY
+إذا اكتملت جميع شروط SELL: decision = SELL
+غير ذلك: decision = HOLD
+لا توجد نتيجة ثالثة.
+
+==================================================
+[18] JSON VALIDATION
+
+تحقق من أن JSON صالح 100%.
+ممنوع: Markdown / نص خارج JSON / Trailing Commas / قيم غير صحيحة / أسعار مخترعة.
+
+decision يجب أن يكون: BUY أو SELL أو HOLD
+
+إذا BUY أو SELL:
+entry_price > 0
+sl_price > 0
+tp1_price > 0
+tp2_price > 0
+confidence >= 75
+(ملاحظة: لا تُخرج points ولا rr إطلاقاً — يُحسبان بالكود)
+
+إذا HOLD:
+entry_price = null
+sl_price = null
+tp1_price = null
+tp2_price = null
+
+==================================================
+[19] FINAL OUTPUT
+
+أخرج JSON فقط بهذا الهيكل بالضبط (بدون أي حقول points أو rr):
 
 {{
-    "decision": "BUY أو SELL أو HOLD",
-    "confidence": 85,
-    "entry_price": 2650.50,
-    "sl_pips": 5.0,
-    "tp1_pips": 10.0,
-    "tp2_pips": 20.0,
-    "rr": "1:2",
-    "risk_percent": 1.0,
-    "duration": "20-30 mins",
-    "session": "لندن",
-    "agent_details": "ملخص مختصر لأصوات الوكلاء",
-    "summary": "ملخص تنفيذي بالعربية"
+"decision": "BUY|SELL|HOLD",
+"confidence": 0,
+"trade_quality_score": 0,
+
+"entry": {{
+"type": "MARKET|LIMIT|NONE",
+"price": null
+}},
+
+"stop_loss": {{
+"price": null
+}},
+
+"take_profit": {{
+"tp1_price": null,
+"tp2_price": null
+}},
+
+"risk_percent": 0,
+"expected_duration": "20-30 mins",
+"session": "",
+"market_bias": "BULLISH|BEARISH|NEUTRAL",
+
+"consensus": {{
+"buy_votes": 0,
+"sell_votes": 0,
+"neutral_votes": 0,
+"weighted_buy_score": 0,
+"weighted_sell_score": 0
+}},
+
+"agents": {{
+"trend": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"session_liquidity": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"smc_liquidity": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"order_block": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"fvg": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"execution_trigger": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"candlestick": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"volume_momentum": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"dxy_correlation": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"sentiment_liquidity": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"news_macro": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}},
+"risk_guard": {{"vote": "BUY|SELL|NEUTRAL", "score": 0, "reason": ""}}
+}},
+
+"key_levels": {{
+"support": [],
+"resistance": [],
+"liquidity_high": [],
+"liquidity_low": [],
+"order_blocks": [],
+"fvg_zones": []
+}},
+
+"invalidation": "",
+"main_reason": "",
+"risk_warning": ""
 }}
+
+==================================================
+[20] ABSOLUTE FINAL RULE
+
+لا توجد صفقة أفضل من صفقة سيئة. HOLD أفضل من BUY أو SELL ضعيف.
+اعتمد فقط على البيانات الفعلية المرفقة.
+لا تخترع سعراً. لا تخترع خبراً. لا تخترع Volume. لا تخترع DXY Structure.
+لا تعتبر الاحتمال حقيقة. لا تطارد السعر.
+لا تدخل بدون Structure Confirmation. لا تدخل بدون Trigger.
+لا تدخل إذا كانت الثقة أقل من 75%. لا تدخل إذا لم يتحقق الإجماع المطلوب.
+حدد الأسعار فقط بدقة — النقاط وR:R تُحسب برمجياً خارج هذا البرومت.
 """
+
+# ============ طبقة الحساب البرمجي الحتمي (نقاط + R:R) ============
+POINT_VALUE_USD = 0.10  # 1 نقطة = 0.10$ على الذهب
+
+def price_to_points(price_diff: float) -> float:
+    return round(abs(price_diff) / POINT_VALUE_USD, 1)
+
+def calculate_trade_metrics(entry_price: float, sl_price: float, tp1_price: float, tp2_price: float) -> dict:
+    sl_points = price_to_points(entry_price - sl_price)
+    tp1_points = price_to_points(tp1_price - entry_price)
+    tp2_points = price_to_points(tp2_price - entry_price)
+    risk = abs(entry_price - sl_price)
+    reward_tp1 = abs(tp1_price - entry_price)
+    reward_tp2 = abs(tp2_price - entry_price)
+    rr_tp1 = round(reward_tp1 / risk, 2) if risk > 0 else None
+    rr_tp2 = round(reward_tp2 / risk, 2) if risk > 0 else None
+    return {
+        "sl_points": sl_points, "tp1_points": tp1_points, "tp2_points": tp2_points,
+        "rr_tp1": rr_tp1, "rr_tp2": rr_tp2, "risk_dollars": round(risk, 2),
+    }
+
+def validate_trade_gates(decision: str, confidence: float, trade_quality_score: float,
+                          metrics: Optional[dict], min_rr: float = 2.0,
+                          min_confidence: float = 75, min_quality: float = 75) -> tuple:
+    """بوابة قبول حتمية لا تعتمد على تقييم الموديل لنفسه. ترجع (مقبول: bool, سبب: str)."""
+    if decision == "HOLD":
+        return True, "HOLD"
+    if decision not in ("BUY", "SELL"):
+        return False, f"decision غير صالح: {decision}"
+    if confidence < min_confidence:
+        return False, f"confidence ({confidence}) أقل من {min_confidence}"
+    if trade_quality_score < min_quality:
+        return False, f"trade_quality_score ({trade_quality_score}) أقل من {min_quality}"
+    if not metrics or metrics.get("rr_tp2") is None:
+        return False, "تعذر حساب R:R - أسعار غير مكتملة"
+    if metrics["rr_tp2"] < min_rr:
+        return False, f"R:R ({metrics['rr_tp2']}) أقل من {min_rr}"
+    return True, "OK"
+
+async def get_news_summary_text() -> str:
+    async with db_lock:
+        blocked = time.time() < db["news_blocked_until"]
+        upcoming = db["upcoming_news"][:3]
+    if blocked:
+        return "🔴 يوجد خبر عالي التأثير قريب - الدخول محظور حاليًا"
+    if upcoming:
+        items = "; ".join(n.get("title", "") for n in upcoming)
+        return f"أخبار قادمة: {items}"
+    return "لا توجد أخبار عالية التأثير قريبة"
 
 
 
@@ -1001,6 +1468,59 @@ async def _gemini_paused() -> bool:
         return False
 
 
+def _build_signal_from_agent_json(data: dict) -> Optional[TradeSignal]:
+    """يحوّل استجابة البرومت الجديد (12 وكيل) إلى TradeSignal، مع حساب النقاط وR:R
+    برمجيًا بدل الاعتماد على حساب الموديل، وتطبيق بوابة القبول الحتمية."""
+    decision = str(data.get("decision", "HOLD")).upper()
+    confidence = max(0, min(100, int(data.get("confidence", 0) or 0)))
+    trade_quality_score = max(0, min(100, int(data.get("trade_quality_score", 0) or 0)))
+
+    entry_price = sl_price = tp1_price = tp2_price = None
+    metrics = None
+    if decision in ("BUY", "SELL"):
+        entry_price = data.get("entry", {}).get("price")
+        sl_price = data.get("stop_loss", {}).get("price")
+        tp1_price = data.get("take_profit", {}).get("tp1_price")
+        tp2_price = data.get("take_profit", {}).get("tp2_price")
+        if None in (entry_price, sl_price, tp1_price, tp2_price):
+            decision = "HOLD"
+        else:
+            entry_price, sl_price, tp1_price, tp2_price = float(entry_price), float(sl_price), float(tp1_price), float(tp2_price)
+            metrics = calculate_trade_metrics(entry_price, sl_price, tp1_price, tp2_price)
+
+    accepted, gate_reason = validate_trade_gates(decision, confidence, trade_quality_score, metrics)
+    if not accepted:
+        decision = "HOLD"
+
+    agents_summary = ""
+    agents = data.get("agents", {})
+    if agents:
+        votes = [f"{name}:{info.get('vote','?')}" for name, info in agents.items()]
+        agents_summary = " | ".join(votes)
+
+    summary = data.get("main_reason", "") or ""
+    risk_warning = data.get("risk_warning", "")
+    if risk_warning:
+        summary = f"{summary} ⚠️ {risk_warning}".strip()
+    if not accepted and gate_reason != "HOLD":
+        summary = f"{summary} [مرفوض برمجيًا: {gate_reason}]".strip()
+
+    return TradeSignal(
+        decision=decision,
+        confidence=confidence,
+        entry_price=entry_price if decision in ("BUY", "SELL") else 0,
+        sl_pips=metrics["sl_points"] if metrics else 0,
+        tp1_pips=metrics["tp1_points"] if metrics else 0,
+        tp2_pips=metrics["tp2_points"] if metrics else 0,
+        rr=f"1:{metrics['rr_tp2']}" if metrics and metrics.get("rr_tp2") is not None else "",
+        risk_percent=float(data.get("risk_percent", 1.0) or 1.0),
+        duration=data.get("expected_duration", ""),
+        session=data.get("session", ""),
+        agent_details=agents_summary,
+        summary=summary,
+    )
+
+
 async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional[TradeSignal]:
     if await _gemini_paused():
         return None
@@ -1009,19 +1529,26 @@ async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional
             db["last_gemini_call"] = time.time()
             db["gemini_calls_today"] += 1
 
+        news_summary = await get_news_summary_text()
         prompt = GOLD_SCALP_PROMPT_JSON.format(
             data_m30=format_candles(tf_data.get("M30", [])),
             data_m15=format_candles(tf_data.get("M15", [])),
             data_m5=format_candles(tf_data.get("M5", [])),
             data_m1=format_candles(tf_data.get("M1", [])),
+            data_dxy=f"DXY الحالي فقط (بدون تاريخ شموع): {dxy_price}",
             dxy_price=dxy_price,
+            current_time=now_str(),
+            current_session=get_session_name(),
+            news_data=news_summary,
+            account_balance="غير محدد - نظام متعدد المستخدمين (كل مستخدم رصيده الخاص)",
+            max_risk_percent="1%",
         )
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "maxOutputTokens": 2000,
+                "maxOutputTokens": 3000,
                 "responseMimeType": "application/json"
             }
         }
@@ -1045,21 +1572,9 @@ async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional
                 text = text.replace("```json", "").replace("```", "").strip()
 
                 data = json.loads(text)
-
-                signal = TradeSignal(
-                    decision=data.get("decision", "HOLD").upper(),
-                    confidence=max(0, min(100, int(data.get("confidence", 0)))),
-                    entry_price=float(data.get("entry_price", 0)),
-                    sl_pips=float(data.get("sl_pips", 0)),
-                    tp1_pips=float(data.get("tp1_pips", 0)),
-                    tp2_pips=float(data.get("tp2_pips", 0)),
-                    rr=data.get("rr", ""),
-                    risk_percent=float(data.get("risk_percent", 1.0)),
-                    duration=data.get("duration", ""),
-                    session=data.get("session", ""),
-                    agent_details=data.get("agent_details", ""),
-                    summary=data.get("summary", "")
-                )
+                signal = _build_signal_from_agent_json(data)
+                if signal is None:
+                    return None
 
                 if not signal.is_valid():
                     print(f"⚠️ إشارة Gemini مرفوضة: entry={signal.entry_price}, sl={signal.sl_pips}, conf={signal.confidence}")
@@ -1076,12 +1591,19 @@ async def analyze_gemini_structured(tf_data: dict, dxy_price: float) -> Optional
 
 async def analyze_groq_structured(tf_data: dict, dxy_price: float) -> Optional[TradeSignal]:
     try:
+        news_summary = await get_news_summary_text()
         prompt = GOLD_SCALP_PROMPT_JSON.format(
             data_m30=format_candles(tf_data.get("M30", [])),
             data_m15=format_candles(tf_data.get("M15", [])),
             data_m5=format_candles(tf_data.get("M5", [])),
             data_m1=format_candles(tf_data.get("M1", [])),
+            data_dxy=f"DXY الحالي فقط (بدون تاريخ شموع): {dxy_price}",
             dxy_price=dxy_price,
+            current_time=now_str(),
+            current_session=get_session_name(),
+            news_data=news_summary,
+            account_balance="غير محدد - نظام متعدد المستخدمين (كل مستخدم رصيده الخاص)",
+            max_risk_percent="1%",
         )
 
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -1092,7 +1614,7 @@ async def analyze_groq_structured(tf_data: dict, dxy_price: float) -> Optional[T
                 {"role": "system", "content": "أنت محلل فني خبير في تداول الذهب (XAU/USD). أعطِ قراراً واضحاً: BUY أو SELL أو HOLD. أخرج النتيجة بصيغة JSON فقط."},
                 {"role": "user", "content": prompt}
             ],
-            "max_tokens": 2000,
+            "max_tokens": 3000,
             "temperature": 0.1,
             "top_p": 0.9,
             "response_format": {"type": "json_object"}
@@ -1114,21 +1636,9 @@ async def analyze_groq_structured(tf_data: dict, dxy_price: float) -> Optional[T
                 text = text.replace("```json", "").replace("```", "").strip()
 
                 data = json.loads(text)
-
-                signal = TradeSignal(
-                    decision=data.get("decision", "HOLD").upper(),
-                    confidence=max(0, min(100, int(data.get("confidence", 0)))),
-                    entry_price=float(data.get("entry_price", 0)),
-                    sl_pips=float(data.get("sl_pips", 0)),
-                    tp1_pips=float(data.get("tp1_pips", 0)),
-                    tp2_pips=float(data.get("tp2_pips", 0)),
-                    rr=data.get("rr", ""),
-                    risk_percent=float(data.get("risk_percent", 1.0)),
-                    duration=data.get("duration", ""),
-                    session=data.get("session", ""),
-                    agent_details=data.get("agent_details", ""),
-                    summary=data.get("summary", "")
-                )
+                signal = _build_signal_from_agent_json(data)
+                if signal is None:
+                    return None
 
                 if not signal.is_valid():
                     print(f"⚠️ إشارة Groq مرفوضة: entry={signal.entry_price}, sl={signal.sl_pips}, conf={signal.confidence}")
@@ -2047,307 +2557,4 @@ async def opportunity_analyzer_coro():
                 should_analyze = True
                 reason = f"مرور {elapsed/60:.0f} دقيقة على آخر تحليل"
 
-            if current_session != last_session and current_session != "خارج الجلسات ⏸️":
-                should_analyze = True
-                reason = f"بداية جلسة {current_session}"
-                async with db_lock: db["last_session_analysis"] = current_session
-
-            if should_analyze:
-                print(f"🔍 [opportunity] سبب التحليل: {reason}")
-                tf_data = await fetch_all_tf()
-                missing = [k for k, v in tf_data.items() if not v]
-                if missing:
-                    print(f"⚠️ [opportunity] بيانات ناقصة: {missing}")
-                    async with db_lock:
-                        db["last_analysis_ts"] = time.time()
-                    await asyncio.sleep(30)
-                    continue
-
-                signal, consensus_status, consensus_confidence = await consensus_analysis(tf_data, current_dxy)
-
-                if signal is None:
-                    if consensus_status == "DISAGREEMENT":
-                        msg_lines = [
-                            "❌ <b>خلاف بين النماذج - لا إشارة</b>",
-                            "",
-                            "⏸️ القرار: HOLD (انتظر توافق)",
-                            "💡 النماذج لا تتفق → لا دخول"
-                        ]
-                        await send_msg("\n".join(msg_lines))
-                    else:
-                        print(f"❌ [opportunity] خطأ في التحليل")
-
-                    async with db_lock:
-                        db["last_analysis_ts"] = time.time()
-                        db["last_sent_price"] = current_price
-                        db["analysis_count"] += 1
-                    await asyncio.sleep(10)
-                    continue
-
-                if consensus_status == "CONSENSUS":
-                    confidence = consensus_confidence
-                    print(f"✅ [opportunity] إجماع كامل! ثقة: {confidence}%")
-                elif consensus_status == "WEAK_CONSENSUS":
-                    confidence = consensus_confidence
-                    print(f"⚠️ [opportunity] إجماع ضعيف! ثقة: {confidence}%")
-                    if confidence < MIN_CONFIDENCE:
-                        print(f"⏸️ [opportunity] ثقة منخفضة ({confidence}% < {MIN_CONFIDENCE}%) → لا إشارة")
-                        msg_lines = [
-                            "⚠️ <b>إجماع ضعيف - لا إشارة</b>",
-                            f"القرار: {signal.decision}",
-                            f"الثقة: {confidence}% (الحد: {MIN_CONFIDENCE}%)",
-                            "💡 توافق جزئي فقط → انتظر فرصة أوضح"
-                        ]
-                        await send_msg("\n".join(msg_lines))
-                        async with db_lock:
-                            db["last_analysis_ts"] = time.time()
-                            db["last_sent_price"] = current_price
-                            db["analysis_count"] += 1
-                        await asyncio.sleep(10)
-                        continue
-                else:
-                    confidence = signal.confidence
-                    print(f"⏸️ [opportunity] بدون إجماع: {signal.decision} (ثقة {confidence}%)")
-
-                async with db_lock:
-                    db["last_analysis_ts"] = time.time()
-                    db["last_sent_price"] = current_price
-                    db["analysis_count"] += 1
-                    db["signals"].append({"text": signal.summary, "time": now_str()})
-                    if signal.decision == "HOLD": db["last_hold_reason"] = signal.summary[:300]
-
-                if signal.decision in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE:
-                    emoji = "🟢" if signal.decision == "BUY" else "🔴"
-
-                    signal_id = f"sig_{int(time.time())}"
-                    async with db_lock:
-                        db["pending_signals"][signal_id] = {
-                            "signal": signal.to_dict(),
-                            "timestamp": time.time(),
-                            "status": "pending",
-                            "user_status": {}
-                        }
-
-                    await save_signal(signal_id, signal.to_dict(), signal.summary)
-
-                    await broadcast_signal_to_users(
-                        signal_id,
-                        f"{emoji} <b>إشارة {signal.decision} (ثقة {confidence}%)</b>\n\n"
-                        f"📊 <b>التفاصيل:</b>\n"
-                        f"السعر المقترح: {signal.entry_price:,.2f}\n"
-                        f"🛑 SL: {signal.sl_pips:.1f} نقاط\n"
-                        f"🎯 TP1: {signal.tp1_pips:.1f} نقاط\n"
-                        f"🎯🎯 TP2: {signal.tp2_pips:.1f} نقاط\n"
-                        f"⚖️ RR: {signal.rr}\n"
-                        f"⏱️ المدة: {signal.duration}\n\n"
-                        f"💡 <b>ملخص:</b> {signal.summary}\n\n"
-                        f"⚠️ <b>اضغط على الزر للتأكيد</b>"
-                    )
-                    print(f"✅ [opportunity] إشارة مرسلة: {signal.decision} @ {current_price}")
-
-                elif signal.decision in ["BUY", "SELL"] and confidence < MIN_CONFIDENCE:
-                    if elapsed >= ANALYSIS_INTERVAL:
-                        await send_msg(
-                            f"⏸️ <b>فرصة ضعيفة - لن تُفتح صفقة</b>\n\n"
-                            f"القرار: {signal.decision} | الثقة: {confidence}% (الحد الأدنى: {MIN_CONFIDENCE}%)\n"
-                            f"📊 لو كانت الثقة كافية، المستوى المقترح:\n"
-                            f"السعر: {signal.entry_price:,.2f} | 🛑 SL: {signal.sl_pips:.1f} | 🎯 TP1: {signal.tp1_pips:.1f}\n\n"
-                            f"💡 {signal.summary}"
-                        )
-                    print(f"⏸️ [opportunity] ثقة منخفضة: {confidence}%")
-
-                else:
-                    async with db_lock: count = db["analysis_count"]
-                    if count % 3 == 0 and elapsed >= ANALYSIS_INTERVAL:
-                        await send_msg(f"⏸️ <b>لا فرص واضحة (HOLD)</b>\nتحاليل: {count} | الجلسة: {current_session}\nالسعر: {current_price:,.2f} | DXY: {current_dxy:.2f}")
-                    print(f"⏸️ [opportunity] HOLD - {reason}")
-
-            await asyncio.sleep(PRICE_POLL_INTERVAL)
-        except Exception as e:
-            print(f"❌ خطأ opportunity_analyzer: {e}")
-            await asyncio.sleep(30)
-
-
-
-# ============ الحلقات المساعدة ============
-
-async def safe_loop(name: str, coro_func, interval: int = 60):
-    while True:
-        try:
-            await coro_func()
-        except asyncio.CancelledError:
-            print(f"⚠️ {name} تم الغاؤه")
-            break
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(f"❌ {name} تعطل: {e}\n{tb}")
-            try:
-                await send_msg(f"⚠️ <b>تنبيه:</b> حلقة {name} تعطلت وسيتم اعادة تشغيلها\n<code>{str(e)[:100]}</code>")
-            except: pass
-            await asyncio.sleep(interval)
-
-async def monitor_coro():
-    while True:
-        async with db_lock:
-            if db["paused"]:
-                await asyncio.sleep(MONITOR_INTERVAL)
-                continue
-        await asyncio.sleep(MONITOR_INTERVAL)
-
-async def news_coro():
-    while True:
-        try:
-            async with db_lock:
-                if db["paused"]:
-                    await asyncio.sleep(60)
-                    continue
-            await check_news_and_alert()
-            await asyncio.sleep(NEWS_CHECK_INTERVAL)
-        except Exception as e:
-            print(f"❌ خطأ news_coro: {e}")
-            await asyncio.sleep(NEWS_CHECK_INTERVAL)
-
-async def report_coro():
-    while True:
-        now = datetime.now(timezone.utc)
-        next_report = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
-        wait = (next_report - now).total_seconds()
-        await asyncio.sleep(wait)
-        async with db_lock:
-            gemini_calls = db["gemini_calls_today"]
-            db["gemini_calls_today"] = 0
-        await save_state()
-        await send_msg(f"📅 <b>التقرير اليومي للنظام</b>\n🤖 عدد التحليلات: {gemini_calls}")
-
-        for uid in await get_all_authorized_user_ids():
-            account = await get_user_account(uid)
-            stats = account["stats"]
-            total = stats["wins"] + stats["losses"]
-            win_rate = (stats["wins"] / total * 100) if total > 0 else 0
-            await _send_raw(
-                uid,
-                f"📊 <b>أداءك (إجمالي)</b>\n"
-                f"الصفقات: {total} | ✅ {stats['wins']} | ❌ {stats['losses']} | ({win_rate:.0f}%)\n"
-                f"النقاط: {stats['total_pips']:+.1f}\n"
-                f"المخاطرة: {account['risk_percent']}%\n"
-                f"الرصيد: {account['balance']:,.2f} USD\n"
-                f"ربح/خسارة: {(account['balance'] - account['initial_balance']):+,.2f} USD"
-            )
-
-async def session_coro():
-    while True:
-        try:
-            now = datetime.now(timezone.utc)
-            for session_name, config in SESSIONS_CONFIG.items():
-                start_h, end_h = config["start"], config["end"]
-                today_key = now.strftime("%Y%m%d")
-                start_key = f"{session_name}_start_{today_key}"
-                end_key = f"{session_name}_end_{today_key}"
-                if now.hour == start_h and now.minute == 0:
-                    async with db_lock:
-                        if not db["session_notified"].get(start_key, False):
-                            db["session_notified"][start_key] = True
-                            await send_msg(f"🟢 <b>جلسة {session_name} بدأت!</b> 🚀")
-                if now.hour == end_h and now.minute == 59:
-                    async with db_lock:
-                        if not db["session_notified"].get(end_key, False):
-                            db["session_notified"][end_key] = True
-                            await send_msg(f"🔴 <b>جلسة {session_name} انتهت</b> ⏸️")
-            async with db_lock:
-                two_days_ago = (now - timedelta(days=2)).strftime("%Y%m%d")
-                for k in list(db["session_notified"].keys()):
-                    if k.endswith(two_days_ago): del db["session_notified"][k]
-            await asyncio.sleep(30)
-        except Exception as e:
-            print(f"❌ خطأ session_coro: {e}")
-            await asyncio.sleep(30)
-
-async def atr_coro():
-    while True:
-        try:
-            async with db_lock:
-                if db["paused"]:
-                    await asyncio.sleep(60)
-                    continue
-            candles = await fetch_tf("15min")
-            if candles and len(candles) > 15:
-                atr = await calculate_atr(candles, 14)
-                async with db_lock:
-                    db["atr_data"]["current"] = atr
-                    threshold, last_alert = db["atr_data"]["threshold"], db["atr_data"]["last_alert"]
-                if atr > threshold and (time.time() - last_alert) > 1800:
-                    await send_msg(f"⚡ <b>تذبذب عالي!</b> ATR: {atr:.2f} نقاط 🚨")
-                    async with db_lock: db["atr_data"]["last_alert"] = time.time()
-            await asyncio.sleep(300)
-        except Exception as e:
-            print(f"❌ خطأ atr_coro: {e}")
-            await asyncio.sleep(300)
-
-async def save_state_coro():
-    while True:
-        await asyncio.sleep(60)
-        await save_state()
-        print("💾 تم حفظ الحالة تلقائياً")
-
-async def main():
-    # تهيئة قاعدة البيانات
-    init_db()
-    init_security_db()
-    await load_state()
-
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("price", cmd_price))
-    application.add_handler(CommandHandler("signal", cmd_signal))
-    application.add_handler(CommandHandler("stats", cmd_stats))
-    application.add_handler(CommandHandler("weekly", cmd_weekly))
-    application.add_handler(CommandHandler("monthly", cmd_monthly))
-    application.add_handler(CommandHandler("equity", cmd_equity_chart))
-    application.add_handler(CommandHandler("atr", cmd_atr))
-    application.add_handler(CommandHandler("errors", cmd_errors))
-    application.add_handler(CommandHandler("force", cmd_force_analysis))
-    application.add_handler(CommandHandler("news", cmd_news))
-    application.add_handler(CommandHandler("risk", cmd_risk))
-    application.add_handler(CommandHandler("setbalance", cmd_setbalance))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
-    application.add_handler(CommandHandler("pause", cmd_pause))
-    application.add_handler(CommandHandler("resume", cmd_resume))
-    application.add_handler(CommandHandler("resetapi", cmd_resetapi))
-    application.add_handler(CommandHandler("trades", cmd_trades))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-
-    print("🚀 البوت يعمل!")
-    await send_msg_with_buttons(
-        "🚀 <b>بوت الذهب يعمل! v7.1</b>\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        f"⏰ الجلسة الحالية: {get_session_name()}\n\n"
-        "🆕 <b>آخر التحديثات:</b>\n"
-        "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط (توفير استهلاك API)\n"
-        "• 🔐 نظام صلاحيات محسّن مع تنبيه فوري لأي دخول غير مصرح\n"
-        "• 🧩 إصلاح نظام الإجماع - قرارات كانت تُفقد بالخطأ صارت تُحتسب صح\n"
-        "• ⚡ حماية تلقائية من نفاذ رصيد مزوّد الأسعار اليومي\n"
-        "• 🐢 تقليل عدد الطلبات لتفادي أي انقطاع بالخدمة\n",
-        quick_action_keyboard_raw()
-    )
-
-    tasks = [
-        asyncio.create_task(safe_loop("monitor", monitor_coro, 10)),
-        asyncio.create_task(safe_loop("opportunity", opportunity_analyzer_coro, 10)),
-        asyncio.create_task(safe_loop("trade_monitor", trade_monitor_coro, 10)),
-        asyncio.create_task(safe_loop("news", news_coro, 60)),
-        asyncio.create_task(safe_loop("report", report_coro, 3600)),
-        asyncio.create_task(safe_loop("session", session_coro, 30)),
-        asyncio.create_task(safe_loop("atr", atr_coro, 300)),
-        asyncio.create_task(safe_loop("save_state", save_state_coro, 60)),
-    ]
-    await asyncio.gather(*tasks)
-
-if __name__ == "__main__":
-    asyncio.run(main())
- 
+            if current 
