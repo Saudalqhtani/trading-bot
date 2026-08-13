@@ -327,6 +327,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY")
 
 DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 WEEKEND_CLOSE_HOUR = int(os.environ.get("WEEKEND_CLOSE_HOUR", 21))
@@ -339,6 +340,7 @@ ANALYSIS_INTERVAL = 180
 MIN_CONFIDENCE = 75
 GEMINI_MODEL = "gemini-3.5-flash"
 GROQ_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile deprecated by Groq, shuts down 2026-08-16
+CEREBRAS_MODEL = "llama-3.3-70b"  # نموذج التأكيد الثالث - يعمل بديلاً عن Gemini+Groq لما يتوقف Gemini
 
 # إعدادات الذهب: $1.00 = 100 pip
 GOLD_PIP_VALUE = 0.01
@@ -1657,12 +1659,120 @@ async def analyze_groq_structured(tf_data: dict, dxy_price: float) -> Optional[T
         print(f"❌ استثناء Groq: {e}")
         return None
 
+
+async def analyze_cerebras_structured(tf_data: dict, dxy_price: float) -> Optional[TradeSignal]:
+    """نموذج تأكيد ثالث مستقل - يُستخدم مع Groq لما يتوقف Gemini (نفاذ رصيد)"""
+    if not CEREBRAS_API_KEY:
+        return None
+    try:
+        news_summary = await get_news_summary_text()
+        prompt = GOLD_SCALP_PROMPT_JSON.format(
+            data_m30=format_candles(tf_data.get("M30", [])),
+            data_m15=format_candles(tf_data.get("M15", [])),
+            data_m5=format_candles(tf_data.get("M5", [])),
+            data_m1=format_candles(tf_data.get("M1", [])),
+            data_dxy=f"DXY الحالي فقط (بدون تاريخ شموع): {dxy_price}",
+            dxy_price=dxy_price,
+            current_time=now_str(),
+            current_session=get_session_name(),
+            news_data=news_summary,
+            account_balance="غير محدد - نظام متعدد المستخدمين (كل مستخدم رصيده الخاص)",
+            max_risk_percent="1%",
+        )
+
+        url = "https://api.cerebras.ai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": CEREBRAS_MODEL,
+            "messages": [
+                {"role": "system", "content": "أنت محلل فني خبير في تداول الذهب (XAU/USD). أعطِ قراراً واضحاً: BUY أو SELL أو HOLD. أخرج النتيجة بصيغة JSON فقط."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"}
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                result = await resp.json()
+
+                if "error" in result:
+                    print(f"❌ Cerebras API خطأ: {result['error'].get('message', 'Unknown')}")
+                    return None
+
+                if "choices" not in result or not result["choices"]:
+                    print("❌ Cerebras: لا يوجد choices")
+                    return None
+
+                text = result["choices"][0]["message"]["content"].strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+
+                data = json.loads(text)
+                signal = _build_signal_from_agent_json(data)
+                if signal is None:
+                    return None
+
+                if not signal.is_valid():
+                    print(f"⚠️ إشارة Cerebras مرفوضة: entry={signal.entry_price}, sl={signal.sl_pips}, conf={signal.confidence}")
+                    return None
+
+                return signal
+
+    except json.JSONDecodeError as e:
+        print(f"❌ Cerebras JSON غير صالح: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ استثناء Cerebras: {e}")
+        return None
+
+
+def _merge_signals(signal_a, label_a: str, signal_b, label_b: str):
+    """يدمج رأيين مستقلين (أي نموذجين) بنفس منطق الإجماع، بغض النظر عن هويتهما"""
+    if signal_a.decision == signal_b.decision and signal_a.decision in ["BUY", "SELL"]:
+        consensus_confidence = min(95, max(signal_a.confidence, signal_b.confidence) + 10)
+        print(f"✅ [consensus] إجماع {label_a}+{label_b} على {signal_a.decision}! ثقة: {consensus_confidence}%")
+        best_signal = signal_a if signal_a.confidence >= signal_b.confidence else signal_b
+        best_signal.confidence = consensus_confidence
+        return best_signal, "CONSENSUS", consensus_confidence
+
+    elif signal_a.decision in ["BUY", "SELL"] and signal_b.decision == "HOLD":
+        reduced_confidence = max(55, signal_a.confidence - 10)
+        print(f"⚠️ [consensus] إجماع ضعيف ({label_a}): {signal_a.decision} | ثقة مخفضة: {reduced_confidence}%")
+        signal_a.confidence = reduced_confidence
+        return signal_a, "WEAK_CONSENSUS", reduced_confidence
+
+    elif signal_a.decision != signal_b.decision and signal_a.decision in ["BUY", "SELL"] and signal_b.decision in ["BUY", "SELL"]:
+        print(f"❌ [consensus] خلاف! {label_a}: {signal_a.decision} vs {label_b}: {signal_b.decision} → HOLD")
+        return None, "DISAGREEMENT", 0
+
+    else:
+        return signal_a, "NO_CONSENSUS", signal_a.confidence
+
+
 async def consensus_analysis(tf_data: dict, dxy_price: float):
     print("🔄 [consensus] بدء تحليل الإجماع...")
 
     if await _gemini_paused():
-        print("⏸️ [consensus] Gemini متوقف مؤقتاً (نفاذ الرصيد) - تخطي هذه الدورة بدون Groq")
-        return None, "GEMINI_PAUSED", 0
+        print("⏸️ [consensus] Gemini متوقف مؤقتاً (نفاذ الرصيد) - التحول لإجماع Groq+Cerebras")
+        groq_signal = await analyze_groq_structured(tf_data, dxy_price)
+        cerebras_signal = await analyze_cerebras_structured(tf_data, dxy_price)
+        if groq_signal is None and cerebras_signal is None:
+            print("⚠️ [consensus] Groq وCerebras فشلا معاً")
+            return None, "BOTH_FAIL", 0
+        if groq_signal is None:
+            print(f"🧠 [consensus] Cerebras فقط: {cerebras_signal.decision} (ثقة {cerebras_signal.confidence}%)")
+            reduced = max(50, cerebras_signal.confidence - 15)
+            cerebras_signal.confidence = reduced
+            return cerebras_signal, "CEREBRAS_ONLY", reduced
+        if cerebras_signal is None:
+            print(f"🦙 [consensus] Groq فقط: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
+            reduced = max(50, groq_signal.confidence - 15)
+            groq_signal.confidence = reduced
+            return groq_signal, "GROQ_ONLY", reduced
+        print(f"🦙 [consensus] Groq: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
+        print(f"🧠 [consensus] Cerebras: {cerebras_signal.decision} (ثقة {cerebras_signal.confidence}%)")
+        return _merge_signals(groq_signal, "Groq", cerebras_signal, "Cerebras")
 
     gemini_signal = await analyze_gemini_structured(tf_data, dxy_price)
     if gemini_signal is None:
@@ -1685,25 +1795,7 @@ async def consensus_analysis(tf_data: dict, dxy_price: float):
 
     print(f"🦙 [consensus] Groq: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
 
-    if gemini_signal.decision == groq_signal.decision and gemini_signal.decision in ["BUY", "SELL"]:
-        consensus_confidence = min(95, max(gemini_signal.confidence, groq_signal.confidence) + 10)
-        print(f"✅ [consensus] إجماع على {gemini_signal.decision}! ثقة: {consensus_confidence}%")
-        best_signal = gemini_signal if gemini_signal.confidence >= groq_signal.confidence else groq_signal
-        best_signal.confidence = consensus_confidence
-        return best_signal, "CONSENSUS", consensus_confidence
-
-    elif gemini_signal.decision in ["BUY", "SELL"] and groq_signal.decision == "HOLD":
-        reduced_confidence = max(55, gemini_signal.confidence - 10)
-        print(f"⚠️ [consensus] إجماع ضعيف: {gemini_signal.decision} | ثقة مخفضة: {reduced_confidence}%")
-        gemini_signal.confidence = reduced_confidence
-        return gemini_signal, "WEAK_CONSENSUS", reduced_confidence
-
-    elif gemini_signal.decision != groq_signal.decision and gemini_signal.decision in ["BUY", "SELL"] and groq_signal.decision in ["BUY", "SELL"]:
-        print(f"❌ [consensus] خلاف! Gemini: {gemini_signal.decision} vs Groq: {groq_signal.decision} → HOLD")
-        return None, "DISAGREEMENT", 0
-
-    else:
-        return gemini_signal, "NO_CONSENSUS", gemini_signal.confidence
+    return _merge_signals(gemini_signal, "Gemini", groq_signal, "Groq")
 
 
 
@@ -2875,3 +2967,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+ 
