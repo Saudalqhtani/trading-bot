@@ -2557,4 +2557,321 @@ async def opportunity_analyzer_coro():
             if last_price > 0:
                 price_diff_pips = abs(current_price - last_price) / GOLD_PIP_VALUE
                 if price_diff_pips >= SIGNIFICANT_MOVE_PIPS:
-                    should_analyze = True 
+                    should_analyze = True
+                    reason = f"تغير سعري كبير ({price_diff_pips:.1f} نقاط)"
+
+            elapsed = time.time() - last_analysis
+            if elapsed >= ANALYSIS_INTERVAL:
+                should_analyze = True
+                reason = f"مرور {elapsed/60:.0f} دقيقة على آخر تحليل"
+
+            if current_session != last_session and current_session != "خارج الجلسات ⏸️":
+                should_analyze = True
+                reason = f"بداية جلسة {current_session}"
+                async with db_lock: db["last_session_analysis"] = current_session
+
+            if should_analyze:
+                print(f"🔍 [opportunity] سبب التحليل: {reason}")
+                tf_data = await fetch_all_tf()
+                missing = [k for k, v in tf_data.items() if not v]
+                if missing:
+                    print(f"⚠️ [opportunity] بيانات ناقصة: {missing}")
+                    async with db_lock:
+                        db["last_analysis_ts"] = time.time()
+                    await asyncio.sleep(30)
+                    continue
+
+                signal, consensus_status, consensus_confidence = await consensus_analysis(tf_data, current_dxy)
+
+                if signal is None:
+                    if consensus_status == "DISAGREEMENT":
+                        msg_lines = [
+                            "❌ <b>خلاف بين النماذج - لا إشارة</b>",
+                            "",
+                            "⏸️ القرار: HOLD (انتظر توافق)",
+                            "💡 النماذج لا تتفق → لا دخول"
+                        ]
+                        await send_msg("\n".join(msg_lines))
+                    else:
+                        print(f"❌ [opportunity] خطأ في التحليل")
+
+                    async with db_lock:
+                        db["last_analysis_ts"] = time.time()
+                        db["last_sent_price"] = current_price
+                        db["analysis_count"] += 1
+                    await asyncio.sleep(10)
+                    continue
+
+                if consensus_status == "CONSENSUS":
+                    confidence = consensus_confidence
+                    print(f"✅ [opportunity] إجماع كامل! ثقة: {confidence}%")
+                elif consensus_status == "WEAK_CONSENSUS":
+                    confidence = consensus_confidence
+                    print(f"⚠️ [opportunity] إجماع ضعيف! ثقة: {confidence}%")
+                    if confidence < MIN_CONFIDENCE:
+                        print(f"⏸️ [opportunity] ثقة منخفضة ({confidence}% < {MIN_CONFIDENCE}%) → لا إشارة")
+                        msg_lines = [
+                            "⚠️ <b>إجماع ضعيف - لا إشارة</b>",
+                            f"القرار: {signal.decision}",
+                            f"الثقة: {confidence}% (الحد: {MIN_CONFIDENCE}%)",
+                            "💡 توافق جزئي فقط → انتظر فرصة أوضح"
+                        ]
+                        await send_msg("\n".join(msg_lines))
+                        async with db_lock:
+                            db["last_analysis_ts"] = time.time()
+                            db["last_sent_price"] = current_price
+                            db["analysis_count"] += 1
+                        await asyncio.sleep(10)
+                        continue
+                else:
+                    confidence = signal.confidence
+                    print(f"⏸️ [opportunity] بدون إجماع: {signal.decision} (ثقة {confidence}%)")
+
+                async with db_lock:
+                    db["last_analysis_ts"] = time.time()
+                    db["last_sent_price"] = current_price
+                    db["analysis_count"] += 1
+                    db["signals"].append({"text": signal.summary, "time": now_str()})
+                    if signal.decision == "HOLD": db["last_hold_reason"] = signal.summary[:300]
+
+                if signal.decision in ["BUY", "SELL"] and confidence >= MIN_CONFIDENCE:
+                    emoji = "🟢" if signal.decision == "BUY" else "🔴"
+
+                    signal_id = f"sig_{int(time.time())}"
+                    async with db_lock:
+                        db["pending_signals"][signal_id] = {
+                            "signal": signal.to_dict(),
+                            "timestamp": time.time(),
+                            "status": "pending",
+                            "user_status": {}
+                        }
+
+                    await save_signal(signal_id, signal.to_dict(), signal.summary)
+
+                    await broadcast_signal_to_users(
+                        signal_id,
+                        f"{emoji} <b>إشارة {signal.decision} (ثقة {confidence}%)</b>\n\n"
+                        f"📊 <b>التفاصيل:</b>\n"
+                        f"السعر المقترح: {signal.entry_price:,.2f}\n"
+                        f"🛑 SL: {signal.sl_pips:.1f} نقاط\n"
+                        f"🎯 TP1: {signal.tp1_pips:.1f} نقاط\n"
+                        f"🎯🎯 TP2: {signal.tp2_pips:.1f} نقاط\n"
+                        f"⚖️ RR: {signal.rr}\n"
+                        f"⏱️ المدة: {signal.duration}\n\n"
+                        f"💡 <b>ملخص:</b> {signal.summary}\n\n"
+                        f"⚠️ <b>اضغط على الزر للتأكيد</b>"
+                    )
+                    print(f"✅ [opportunity] إشارة مرسلة: {signal.decision} @ {current_price}")
+
+                elif signal.decision in ["BUY", "SELL"] and confidence < MIN_CONFIDENCE:
+                    if elapsed >= ANALYSIS_INTERVAL:
+                        await send_msg(
+                            f"⏸️ <b>فرصة ضعيفة - لن تُفتح صفقة</b>\n\n"
+                            f"القرار: {signal.decision} | الثقة: {confidence}% (الحد الأدنى: {MIN_CONFIDENCE}%)\n"
+                            f"📊 لو كانت الثقة كافية، المستوى المقترح:\n"
+                            f"السعر: {signal.entry_price:,.2f} | 🛑 SL: {signal.sl_pips:.1f} | 🎯 TP1: {signal.tp1_pips:.1f}\n\n"
+                            f"💡 {signal.summary}"
+                        )
+                    print(f"⏸️ [opportunity] ثقة منخفضة: {confidence}%")
+
+                else:
+                    async with db_lock: count = db["analysis_count"]
+                    if count % 3 == 0 and elapsed >= ANALYSIS_INTERVAL:
+                        await send_msg(f"⏸️ <b>لا فرص واضحة (HOLD)</b>\nتحاليل: {count} | الجلسة: {current_session}\nالسعر: {current_price:,.2f} | DXY: {current_dxy:.2f}")
+                    print(f"⏸️ [opportunity] HOLD - {reason}")
+
+            await asyncio.sleep(PRICE_POLL_INTERVAL)
+        except Exception as e:
+            print(f"❌ خطأ opportunity_analyzer: {e}")
+            await asyncio.sleep(30)
+
+
+
+# ============ الحلقات المساعدة ============
+
+async def safe_loop(name: str, coro_func, interval: int = 60):
+    while True:
+        try:
+            await coro_func()
+        except asyncio.CancelledError:
+            print(f"⚠️ {name} تم الغاؤه")
+            break
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"❌ {name} تعطل: {e}\n{tb}")
+            try:
+                await send_msg(f"⚠️ <b>تنبيه:</b> حلقة {name} تعطلت وسيتم اعادة تشغيلها\n<code>{str(e)[:100]}</code>")
+            except: pass
+            await asyncio.sleep(interval)
+
+async def monitor_coro():
+    while True:
+        async with db_lock:
+            if db["paused"]:
+                await asyncio.sleep(MONITOR_INTERVAL)
+                continue
+        await asyncio.sleep(MONITOR_INTERVAL)
+
+async def news_coro():
+    while True:
+        try:
+            async with db_lock:
+                if db["paused"]:
+                    await asyncio.sleep(60)
+                    continue
+            await check_news_and_alert()
+            await asyncio.sleep(NEWS_CHECK_INTERVAL)
+        except Exception as e:
+            print(f"❌ خطأ news_coro: {e}")
+            await asyncio.sleep(NEWS_CHECK_INTERVAL)
+
+async def report_coro():
+    while True:
+        now = datetime.now(timezone.utc)
+        next_report = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
+        wait = (next_report - now).total_seconds()
+        await asyncio.sleep(wait)
+        async with db_lock:
+            gemini_calls = db["gemini_calls_today"]
+            db["gemini_calls_today"] = 0
+        await save_state()
+        await send_msg(f"📅 <b>التقرير اليومي للنظام</b>\n🤖 عدد التحليلات: {gemini_calls}")
+
+        for uid in await get_all_authorized_user_ids():
+            account = await get_user_account(uid)
+            stats = account["stats"]
+            total = stats["wins"] + stats["losses"]
+            win_rate = (stats["wins"] / total * 100) if total > 0 else 0
+            await _send_raw(
+                uid,
+                f"📊 <b>أداءك (إجمالي)</b>\n"
+                f"الصفقات: {total} | ✅ {stats['wins']} | ❌ {stats['losses']} | ({win_rate:.0f}%)\n"
+                f"النقاط: {stats['total_pips']:+.1f}\n"
+                f"المخاطرة: {account['risk_percent']}%\n"
+                f"الرصيد: {account['balance']:,.2f} USD\n"
+                f"ربح/خسارة: {(account['balance'] - account['initial_balance']):+,.2f} USD"
+            )
+
+async def session_coro():
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            for session_name, config in SESSIONS_CONFIG.items():
+                start_h, end_h = config["start"], config["end"]
+                today_key = now.strftime("%Y%m%d")
+                start_key = f"{session_name}_start_{today_key}"
+                end_key = f"{session_name}_end_{today_key}"
+                if now.hour == start_h and now.minute == 0:
+                    async with db_lock:
+                        if not db["session_notified"].get(start_key, False):
+                            db["session_notified"][start_key] = True
+                            await send_msg(f"🟢 <b>جلسة {session_name} بدأت!</b> 🚀")
+                if now.hour == end_h and now.minute == 59:
+                    async with db_lock:
+                        if not db["session_notified"].get(end_key, False):
+                            db["session_notified"][end_key] = True
+                            await send_msg(f"🔴 <b>جلسة {session_name} انتهت</b> ⏸️")
+            async with db_lock:
+                two_days_ago = (now - timedelta(days=2)).strftime("%Y%m%d")
+                for k in list(db["session_notified"].keys()):
+                    if k.endswith(two_days_ago): del db["session_notified"][k]
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"❌ خطأ session_coro: {e}")
+            await asyncio.sleep(30)
+
+async def atr_coro():
+    while True:
+        try:
+            async with db_lock:
+                if db["paused"]:
+                    await asyncio.sleep(60)
+                    continue
+            candles = await fetch_tf("15min")
+            if candles and len(candles) > 15:
+                atr = await calculate_atr(candles, 14)
+                async with db_lock:
+                    db["atr_data"]["current"] = atr
+                    threshold, last_alert = db["atr_data"]["threshold"], db["atr_data"]["last_alert"]
+                if atr > threshold and (time.time() - last_alert) > 1800:
+                    await send_msg(f"⚡ <b>تذبذب عالي!</b> ATR: {atr:.2f} نقاط 🚨")
+                    async with db_lock: db["atr_data"]["last_alert"] = time.time()
+            await asyncio.sleep(300)
+        except Exception as e:
+            print(f"❌ خطأ atr_coro: {e}")
+            await asyncio.sleep(300)
+
+async def save_state_coro():
+    while True:
+        await asyncio.sleep(60)
+        await save_state()
+        print("💾 تم حفظ الحالة تلقائياً")
+
+async def main():
+    # تهيئة قاعدة البيانات
+    try:
+        init_db()
+        init_security_db()
+        await load_state()
+    except Exception as e:
+        print(f"❌ فشل تهيئة قاعدة البيانات - البوت لن يعمل بشكل صحيح: {e}")
+        raise
+
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("price", cmd_price))
+    application.add_handler(CommandHandler("signal", cmd_signal))
+    application.add_handler(CommandHandler("stats", cmd_stats))
+    application.add_handler(CommandHandler("weekly", cmd_weekly))
+    application.add_handler(CommandHandler("monthly", cmd_monthly))
+    application.add_handler(CommandHandler("equity", cmd_equity_chart))
+    application.add_handler(CommandHandler("atr", cmd_atr))
+    application.add_handler(CommandHandler("errors", cmd_errors))
+    application.add_handler(CommandHandler("force", cmd_force_analysis))
+    application.add_handler(CommandHandler("news", cmd_news))
+    application.add_handler(CommandHandler("risk", cmd_risk))
+    application.add_handler(CommandHandler("setbalance", cmd_setbalance))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+    application.add_handler(CommandHandler("pause", cmd_pause))
+    application.add_handler(CommandHandler("resume", cmd_resume))
+    application.add_handler(CommandHandler("resetapi", cmd_resetapi))
+    application.add_handler(CommandHandler("trades", cmd_trades))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+
+    print("🚀 البوت يعمل!")
+    try:
+        await send_msg_with_buttons(
+            "🚀 <b>بوت الذهب يعمل! v7.1</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"⏰ الجلسة الحالية: {get_session_name()}\n\n"
+            "🆕 <b>آخر التحديثات:</b>\n"
+            "• 🎯 التحليل الآن يقتصر على جلستي لندن ونيويورك فقط (توفير استهلاك API)\n"
+            "• 🔐 نظام صلاحيات محسّن مع تنبيه فوري لأي دخول غير مصرح\n"
+            "• 🧩 إصلاح نظام الإجماع - قرارات كانت تُفقد بالخطأ صارت تُحتسب صح\n"
+            "• ⚡ حماية تلقائية من نفاذ رصيد مزوّد الأسعار اليومي\n"
+            "• 🐢 تقليل عدد الطلبات لتفادي أي انقطاع بالخدمة\n",
+            quick_action_keyboard_raw()
+        )
+    except Exception as e:
+        print(f"❌ فشل ارسال رسالة بدء التشغيل (البوت سيكمل التشغيل رغم ذلك): {e}")
+
+    tasks = [
+        asyncio.create_task(safe_loop("monitor", monitor_coro, 10)),
+        asyncio.create_task(safe_loop("opportunity", opportunity_analyzer_coro, 10)),
+        asyncio.create_task(safe_loop("trade_monitor", trade_monitor_coro, 10)),
+        asyncio.create_task(safe_loop("news", news_coro, 60)),
+        asyncio.create_task(safe_loop("report", report_coro, 3600)),
+        asyncio.create_task(safe_loop("session", session_coro, 30)),
+        asyncio.create_task(safe_loop("atr", atr_coro, 300)),
+        asyncio.create_task(safe_loop("save_state", save_state_coro, 60)),
+    ]
+    await asyncio.gather(*tasks)
+
+if __name__ == "__main__":
+    asyncio.run(main())
