@@ -216,7 +216,11 @@ async def get_all_authorized_user_ids() -> list:
         rows = cursor.fetchall()
         conn.close()
         return rows
-    rows = _query()
+    try:
+        rows = _query()
+    except Exception as e:
+        print(f"❌ خطأ قراءة authorized_users (سيتم استخدام المشرفين فقط): {e}")
+        rows = []
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     ids = set(ADMIN_USER_IDS)
     for uid, expires_at in rows:
@@ -1656,6 +1660,10 @@ async def analyze_groq_structured(tf_data: dict, dxy_price: float) -> Optional[T
 async def consensus_analysis(tf_data: dict, dxy_price: float):
     print("🔄 [consensus] بدء تحليل الإجماع...")
 
+    if await _gemini_paused():
+        print("⏸️ [consensus] Gemini متوقف مؤقتاً (نفاذ الرصيد) - تخطي هذه الدورة بدون Groq")
+        return None, "GEMINI_PAUSED", 0
+
     gemini_signal = await analyze_gemini_structured(tf_data, dxy_price)
     if gemini_signal is None:
         print("⚠️ [consensus] Gemini فشل - تجربة Groq فقط كاحتياطي")
@@ -2549,12 +2557,4 @@ async def opportunity_analyzer_coro():
             if last_price > 0:
                 price_diff_pips = abs(current_price - last_price) / GOLD_PIP_VALUE
                 if price_diff_pips >= SIGNIFICANT_MOVE_PIPS:
-                    should_analyze = True
-                    reason = f"تغير سعري كبير ({price_diff_pips:.1f} نقاط)"
-
-            elapsed = time.time() - last_analysis
-            if elapsed >= ANALYSIS_INTERVAL:
-                should_analyze = True
-                reason = f"مرور {elapsed/60:.0f} دقيقة على آخر تحليل"
-
-            if current 
+                    should_analyze = True 
