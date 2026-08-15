@@ -1091,15 +1091,14 @@ def calculate_trade_metrics(entry_price: float, sl_price: float, tp1_price: floa
 def validate_trade_gates(decision: str, confidence: float, trade_quality_score: float,
                           metrics: Optional[dict], min_rr: float = 2.0,
                           min_confidence: float = 75, min_quality: float = 75) -> tuple:
-    """بوابة قبول حتمية لا تعتمد على تقييم الموديل لنفسه. ترجع (مقبول: bool, سبب: str)."""
+    """بوابة قبول حتمية على مستوى السعر (R:R) فقط. لا نرفض هنا بسبب انخفاض الثقة/الجودة
+    الفردية لنموذج واحد - رأي نموذج بثقة أقل من الحد قد يتفق مع نموذج ثانٍ ويرتفع بعد
+    الإجماع فوق الحد. فحص الثقة النهائي يصير بعد دمج آراء النماذج في opportunity_analyzer_coro.
+    R:R لا يتأثر بالإجماع (خاصية سعرية ثابتة)، لذلك يبقى شرطًا صارمًا هنا."""
     if decision == "HOLD":
         return True, "HOLD"
     if decision not in ("BUY", "SELL"):
         return False, f"decision غير صالح: {decision}"
-    if confidence < min_confidence:
-        return False, f"confidence ({confidence}) أقل من {min_confidence}"
-    if trade_quality_score < min_quality:
-        return False, f"trade_quality_score ({trade_quality_score}) أقل من {min_quality}"
     if not metrics or metrics.get("rr_tp2") is None:
         return False, "تعذر حساب R:R - أسعار غير مكتملة"
     if metrics["rr_tp2"] < min_rr:
