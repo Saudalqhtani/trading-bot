@@ -10,7 +10,8 @@ Security Bot v2.0 - بوت إدارة الأمان (نسخة محسّنة بال
 
 import os
 import sys
-import sqlite3
+import asyncio
+import asyncpg
 import logging
 import re
 import csv
@@ -25,11 +26,13 @@ SECURITY_BOT_TOKEN = os.environ.get("SECURITY_BOT_TOKEN")
 # يدعم عدة مشرفين: ADMIN_USER_IDS="111,222,333" (أو ADMIN_USER_ID القديم لمشرف واحد)
 _admin_raw = os.environ.get("ADMIN_USER_IDS", "") or os.environ.get("ADMIN_USER_ID", "")
 ADMIN_USER_IDS = set(x.strip() for x in _admin_raw.split(",") if x.strip())
-DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # اتصال Postgres خارجي (Neon/Supabase/أي مزود) - مشترك مع بوت التداول
 # يظهر للمستخدم غير المصرح كطريقة تواصل مع المشرف، مثلا: @my_username
 ADMIN_CONTACT = os.environ.get("ADMIN_CONTACT", "")
 
 _unauth_alert_cooldown = {}  # user_id -> آخر وقت تم تنبيه المشرف فيه، لمنع الإزعاج المتكرر
+
+pg_pool: "asyncpg.Pool | None" = None
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -39,47 +42,43 @@ logger = logging.getLogger(__name__)
 
 logger.info("=" * 50)
 logger.info("SECURITY BOT v2.0 STARTING")
-logger.info(f"DB_PATH: {DB_PATH}")
+logger.info(f"DATABASE_URL set: {bool(DATABASE_URL)}")
 logger.info(f"Admin count: {len(ADMIN_USER_IDS)}")
 logger.info(f"SECURITY_BOT_TOKEN set: {bool(SECURITY_BOT_TOKEN)}")
 logger.info("=" * 50)
 
-# ============ دوال قاعدة البيانات ============
+# ============ دوال قاعدة البيانات (Postgres مشترك مع بوت التداول) ============
 
-def init_db():
-    logger.info("Initializing DB...")
+async def init_db():
+    global pg_pool
+    logger.info("Initializing Postgres pool...")
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL not set! Exiting.")
+        raise RuntimeError("DATABASE_URL غير مضبوط - البوت يحتاج قاعدة بيانات Postgres خارجية للعمل")
     try:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS authorized_users (
-                user_id TEXT PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                added_by TEXT,
-                expires_at TIMESTAMP
-            )
-        """)
-        # ترحيل: أضف عمود expires_at لو الجدول كان موجود من قبل بدونه
-        cursor.execute("PRAGMA table_info(authorized_users)")
-        cols = [row[1] for row in cursor.fetchall()]
-        if "expires_at" not in cols:
-            cursor.execute("ALTER TABLE authorized_users ADD COLUMN expires_at TIMESTAMP")
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS activity_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL,
-                user_id TEXT,
-                actor_id TEXT,
-                note TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        conn.close()
-        logger.info("DB initialized successfully")
+        pg_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        async with pg_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS authorized_users (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    added_at TIMESTAMP DEFAULT NOW(),
+                    added_by TEXT,
+                    expires_at TIMESTAMP
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS activity_log (
+                    id SERIAL PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    user_id TEXT,
+                    actor_id TEXT,
+                    note TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+        logger.info("Postgres DB initialized successfully (shared with trading bot)")
     except Exception as e:
         logger.error(f"DB init error: {e}")
         raise
@@ -87,45 +86,35 @@ def init_db():
 def is_admin(user_id) -> bool:
     return str(user_id) in ADMIN_USER_IDS
 
-def log_activity(action, user_id=None, actor_id=None, note=None):
+async def log_activity(action, user_id=None, actor_id=None, note=None):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO activity_log (action, user_id, actor_id, note) VALUES (?, ?, ?, ?)",
-            (action, str(user_id) if user_id else None, str(actor_id) if actor_id else None, note)
-        )
-        conn.commit()
-        conn.close()
+        async with pg_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO activity_log (action, user_id, actor_id, note) VALUES ($1, $2, $3, $4)",
+                action, str(user_id) if user_id else None, str(actor_id) if actor_id else None, note
+            )
     except Exception as e:
         logger.error(f"Activity log error: {e}")
 
-def get_activity_log(limit=15):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT action, user_id, actor_id, note, created_at FROM activity_log ORDER BY id DESC LIMIT ?", (limit,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+async def get_activity_log(limit=15):
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT action, user_id, actor_id, note, created_at FROM activity_log ORDER BY id DESC LIMIT $1",
+            limit
+        )
+    return [(r["action"], r["user_id"], r["actor_id"], r["note"], r["created_at"]) for r in rows]
 
-def is_authorized(user_id) -> bool:
+async def is_authorized(user_id) -> bool:
     if is_admin(user_id):
         return True
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT expires_at FROM authorized_users WHERE user_id = ?", (str(user_id),))
-        result = cursor.fetchone()
-        conn.close()
-        if result is None:
+        async with pg_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT expires_at FROM authorized_users WHERE user_id = $1", str(user_id))
+        if row is None:
             return False
-        expires_at = result[0]
-        if expires_at:
-            try:
-                if datetime.fromisoformat(expires_at) <= datetime.now(timezone.utc).replace(tzinfo=None):
-                    return False
-            except ValueError:
-                pass
+        expires_at = row["expires_at"]
+        if expires_at and expires_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+            return False
         return True
     except Exception as e:
         logger.error(f"Auth check error: {e}")
@@ -157,56 +146,43 @@ async def alert_admins_unauthorized(context: ContextTypes.DEFAULT_TYPE, user_id,
         except Exception as e:
             logger.warning(f"Admin alert failed for {admin_id}: {e}")
 
-def add_user(user_id, username=None, first_name=None, added_by=None, expires_at=None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO authorized_users (user_id, username, first_name, added_by, expires_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (str(user_id), username, first_name, str(added_by) if added_by else None, expires_at))
-    conn.commit()
-    conn.close()
+async def add_user(user_id, username=None, first_name=None, added_by=None, expires_at=None):
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    async with pg_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO authorized_users (user_id, username, first_name, added_by, expires_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username=excluded.username, first_name=excluded.first_name,
+                added_by=excluded.added_by, expires_at=excluded.expires_at
+        """, str(user_id), username, first_name, str(added_by) if added_by else None, expires_at)
     note = f"مؤقت حتى {expires_at}" if expires_at else "دائم"
-    log_activity("added", user_id, added_by, note)
+    await log_activity("added", user_id, added_by, note)
 
-def remove_user(user_id, removed_by=None, note=None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM authorized_users WHERE user_id = ?", (str(user_id),))
-    conn.commit()
-    conn.close()
-    log_activity("removed", user_id, removed_by, note)
+async def remove_user(user_id, removed_by=None, note=None):
+    async with pg_pool.acquire() as conn:
+        await conn.execute("DELETE FROM authorized_users WHERE user_id = $1", str(user_id))
+    await log_activity("removed", user_id, removed_by, note)
 
-def get_expired_users():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, first_name, expires_at FROM authorized_users WHERE expires_at IS NOT NULL")
-    rows = cursor.fetchall()
-    conn.close()
+async def get_expired_users():
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, first_name, expires_at FROM authorized_users WHERE expires_at IS NOT NULL")
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     expired = []
-    for uid, username, first_name, expires_at in rows:
-        try:
-            if datetime.fromisoformat(expires_at) <= now:
-                expired.append((uid, username, first_name))
-        except (TypeError, ValueError):
-            continue
+    for row in rows:
+        if row["expires_at"] and row["expires_at"] <= now:
+            expired.append((row["user_id"], row["username"], row["first_name"]))
     return expired
 
-def get_users():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, first_name, added_at, expires_at FROM authorized_users ORDER BY added_at DESC")
-    users = cursor.fetchall()
-    conn.close()
-    return users
+async def get_users():
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, first_name, added_at, expires_at FROM authorized_users ORDER BY added_at DESC")
+    return [(r["user_id"], r["username"], r["first_name"], r["added_at"], r["expires_at"]) for r in rows]
 
-def get_user_count():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM authorized_users")
-    count = cursor.fetchone()[0]
-    conn.close()
+async def get_user_count():
+    async with pg_pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM authorized_users")
     return count
 
 # ============ دوال مساعدة ============
@@ -265,7 +241,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/id - عرض معرفك" + "\n" +
             "/check - التحقق من صلاحيتك"
         )
-        if is_authorized(user_id):
+        if await is_authorized(user_id):
             text += "\n\n" + "انت مصرح لاستخدام بوت التداول!"
             await update.message.reply_text(text)
         else:
@@ -310,14 +286,14 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             expires_at = expires_dt.isoformat()
             expiry_note = f"\n⏳ صلاحية مؤقتة: {days} يوم (حتى {expires_dt.strftime('%Y-%m-%d %H:%M')} UTC)"
         
-        if is_authorized(target_id):
+        if await is_authorized(target_id):
             await update.message.reply_text(
                 "المستخدم موجود مسبقا!" + "\n\n" +
                 format_user_info(target_id, target_username, target_first_name)
             )
             return
         
-        add_user(target_id, target_username, target_first_name, user.id, expires_at)
+        await add_user(target_id, target_username, target_first_name, user.id, expires_at)
         
         await update.message.reply_text(
             "تمت الاضافة!" + "\n\n" +
@@ -366,7 +342,7 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("المعرف يجب ان يكون رقما!")
         return
     
-    if is_authorized(target_id):
+    if await is_authorized(target_id):
         await update.message.reply_text(f"المستخدم {target_id} موجود مسبقا.")
         return
     
@@ -377,7 +353,7 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expires_at = expires_dt.isoformat()
         expiry_note = f"\n⏳ صلاحية مؤقتة: {days} يوم (حتى {expires_dt.strftime('%Y-%m-%d %H:%M')} UTC)"
     
-    add_user(target_id, added_by=user.id, expires_at=expires_at)
+    await add_user(target_id, added_by=user.id, expires_at=expires_at)
     
     await update.message.reply_text(
         "تمت الاضافة!" + "\n\n" +
@@ -415,7 +391,7 @@ async def removeuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"معرف غير صالح! المدخل: {raw_id}")
         return
     
-    if not is_authorized(target_id):
+    if not await is_authorized(target_id):
         await update.message.reply_text(f"المستخدم {target_id} غير موجود.")
         return
     
@@ -443,8 +419,8 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("هذا الامر للمشرف فقط!")
         return
     
-    users = get_users()
-    count = get_user_count()
+    users = await get_users()
+    count = await get_user_count()
     
     if not users:
         await update.message.reply_text("لا يوجد مستخدمون مصرح لهم.")
@@ -486,7 +462,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if is_admin(target_id):
             await update.message.reply_text(f"المستخدم {target_id} هو المشرف!")
-        elif is_authorized(target_id):
+        elif await is_authorized(target_id):
             await update.message.reply_text(f"المستخدم {target_id} مصرح.")
         else:
             await update.message.reply_text(
@@ -499,7 +475,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "انت المشرف!" + "\n\n" +
                 f"معرفك: {user.id}"
             )
-        elif is_authorized(user.id):
+        elif await is_authorized(user.id):
             await update.message.reply_text(
                 "انت مصرح لاستخدام بوت التداول." + "\n\n" +
                 f"معرفك: {user.id}"
@@ -522,7 +498,7 @@ async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("هذا الامر للمشرف فقط!")
         return
     
-    entries = get_activity_log(limit=15)
+    entries = await get_activity_log(limit=15)
     if not entries:
         await update.message.reply_text("لا يوجد نشاط مسجل بعد.")
         return
@@ -553,7 +529,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     message_text = "📢 " + " ".join(context.args)
-    users = get_users()
+    users = await get_users()
     if not users:
         await update.message.reply_text("لا يوجد مستخدمون لارسال البث لهم.")
         return
@@ -567,7 +543,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Broadcast failed for {uid}: {e}")
             failed += 1
     
-    log_activity("broadcast", actor_id=user.id, note=message_text[:200])
+    await log_activity("broadcast", actor_id=user.id, note=message_text[:200])
     await update.message.reply_text(f"تم الارسال: {sent} نجح | {failed} فشل")
 
 # ============ تصدير القائمة ============
@@ -578,7 +554,7 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("هذا الامر للمشرف فقط!")
         return
     
-    users = get_users()
+    users = await get_users()
     if not users:
         await update.message.reply_text("لا يوجد مستخدمون لتصديرهم.")
         return
@@ -600,12 +576,12 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ فحص دوري لانتهاء الصلاحيات المؤقتة ============
 
 async def check_expired_job(context: ContextTypes.DEFAULT_TYPE):
-    expired = get_expired_users()
+    expired = await get_expired_users()
     if not expired:
         return
     for uid, username, first_name in expired:
-        remove_user(uid, removed_by=None, note="انتهت المدة المؤقتة تلقائيا")
-        log_activity("expired", uid, None, "انتهاء تلقائي")
+        await remove_user(uid, removed_by=None, note="انتهت المدة المؤقتة تلقائيا")
+        await log_activity("expired", uid, None, "انتهاء تلقائي")
         name_display = first_name or (f"@{username}" if username else f"مستخدم {uid}")
         for admin_id in ADMIN_USER_IDS:
             try:
@@ -638,10 +614,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("quickadd_"):
         target_id = data.replace("quickadd_", "")
-        if is_authorized(target_id):
+        if await is_authorized(target_id):
             await query.edit_message_text(f"✅ المستخدم {target_id} مصرح مسبقًا.")
             return
-        add_user(target_id, added_by=user.id)
+        await add_user(target_id, added_by=user.id)
         await query.edit_message_text(f"✅ تمت اضافة المستخدم {target_id} فورًا.")
         try:
             await context.bot.send_message(
@@ -654,7 +630,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data == "menu_log":
         keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
-        entries = get_activity_log(limit=15)
+        entries = await get_activity_log(limit=15)
         if not entries:
             await query.edit_message_text(
                 "لا يوجد نشاط مسجل بعد.",
@@ -675,7 +651,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if data == "menu_export":
-        users = get_users()
+        users = await get_users()
         if not users:
             await query.answer("لا يوجد مستخدمون لتصديرهم.", show_alert=True)
             return
@@ -721,7 +697,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     elif data == "menu_remove":
-        users = get_users()
+        users = await get_users()
         if not users:
             keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
             await query.edit_message_text(
@@ -761,7 +737,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("confirm_remove_"):
         target_id = data.replace("confirm_remove_", "")
         
-        if not is_authorized(target_id):
+        if not await is_authorized(target_id):
             keyboard = [[InlineKeyboardButton("رجوع", callback_data="menu_main")]]
             await query.edit_message_text(
                 f"المستخدم {target_id} غير موجود.",
@@ -777,7 +753,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        remove_user(target_id, removed_by=user.id)
+        await remove_user(target_id, removed_by=user.id)
         
         try:
             await context.bot.send_message(
@@ -808,8 +784,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     elif data == "menu_users":
-        users = get_users()
-        count = get_user_count()
+        users = await get_users()
+        count = await get_user_count()
         
         if not users:
             keyboard = [
@@ -892,16 +868,17 @@ def main():
         logger.warning("No admins configured (ADMIN_USER_IDS/ADMIN_USER_ID) - no one can manage users!")
     else:
         logger.info(f"Admins: {ADMIN_USER_IDS}")
-    
-    try:
-        init_db()
-    except Exception as e:
-        logger.error(f"Failed to init DB: {e}")
-        sys.exit(1)
-    
+
+    async def _post_init(app: Application):
+        try:
+            await init_db()
+        except Exception as e:
+            logger.error(f"Failed to init DB: {e}")
+            raise
+
     try:
         logger.info("Building application...")
-        application = Application.builder().token(SECURITY_BOT_TOKEN).build()
+        application = Application.builder().token(SECURITY_BOT_TOKEN).post_init(_post_init).build()
         logger.info("Application built successfully")
     except Exception as e:
         logger.error(f"Failed to build application: {e}")
@@ -940,4 +917,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
