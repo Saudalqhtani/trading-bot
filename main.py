@@ -27,12 +27,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 # ============ نظام الأمان ============
-import sqlite3
 import time as _time_sec
 from functools import wraps
 from datetime import datetime as _dt_sec, timezone as _tz_sec
+import asyncpg
 
-SECURITY_DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # اتصال Postgres خارجي (Neon/Supabase/أي مزود) - مشترك بين البوتين
 # يدعم عدة مشرفين: ADMIN_USER_IDS="111,222,333" (أو ADMIN_USER_ID القديم لمشرف واحد)
 _admin_raw_sec = os.environ.get("ADMIN_USER_IDS", "") or os.environ.get("ADMIN_USER_ID", "")
 ADMIN_USER_IDS = set(x.strip() for x in _admin_raw_sec.split(",") if x.strip())
@@ -46,62 +46,58 @@ def contact_admin_text() -> str:
 
 _unauth_alert_cooldown = {}  # user_id -> آخر وقت تم تنبيه المشرف فيه، لمنع الإزعاج المتكرر
 
+pg_pool: Optional[asyncpg.Pool] = None
 
-def init_security_db():
-    os.makedirs(os.path.dirname(SECURITY_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(SECURITY_DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS authorized_users (
-            user_id TEXT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            added_by TEXT,
-            expires_at TIMESTAMP
-        )
-    """)
-    cursor.execute("PRAGMA table_info(authorized_users)")
-    cols = [row[1] for row in cursor.fetchall()]
-    if "expires_at" not in cols:
-        cursor.execute("ALTER TABLE authorized_users ADD COLUMN expires_at TIMESTAMP")
-    if "first_name" not in cols:
-        cursor.execute("ALTER TABLE authorized_users ADD COLUMN first_name TEXT")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS activity_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            action TEXT NOT NULL,
-            user_id TEXT,
-            actor_id TEXT,
-            note TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_accounts (
-            user_id TEXT PRIMARY KEY,
-            balance REAL DEFAULT 10000,
-            initial_balance REAL DEFAULT 10000,
-            risk_percent REAL DEFAULT 1.0,
-            active_trade TEXT,
-            stats TEXT,
-            equity_history TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            direction TEXT, entry_price REAL, exit_price REAL,
-            pnl_pips REAL, pnl_usd REAL, result TEXT, confidence REAL,
-            open_time REAL, close_time TEXT,
-            sl_pips REAL, tp1_pips REAL, tp2_pips REAL, rr TEXT, duration TEXT, lot_size REAL
-        )
-    """)
-    conn.commit()
-    conn.close()
-    print("Security DB ready")
+async def init_security_db():
+    global pg_pool
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL غير مضبوط - البوت يحتاج قاعدة بيانات Postgres خارجية للعمل")
+    pg_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    async with pg_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS authorized_users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                added_at TIMESTAMP DEFAULT NOW(),
+                added_by TEXT,
+                expires_at TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id SERIAL PRIMARY KEY,
+                action TEXT NOT NULL,
+                user_id TEXT,
+                actor_id TEXT,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_accounts (
+                user_id TEXT PRIMARY KEY,
+                balance DOUBLE PRECISION DEFAULT 10000,
+                initial_balance DOUBLE PRECISION DEFAULT 10000,
+                risk_percent DOUBLE PRECISION DEFAULT 1.0,
+                active_trade TEXT,
+                stats TEXT,
+                equity_history TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_trades (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                direction TEXT, entry_price DOUBLE PRECISION, exit_price DOUBLE PRECISION,
+                pnl_pips DOUBLE PRECISION, pnl_usd DOUBLE PRECISION, result TEXT, confidence DOUBLE PRECISION,
+                open_time DOUBLE PRECISION, close_time TEXT,
+                sl_pips DOUBLE PRECISION, tp1_pips DOUBLE PRECISION, tp2_pips DOUBLE PRECISION,
+                rr TEXT, duration TEXT, lot_size DOUBLE PRECISION
+            )
+        """)
+    print("✅ Postgres DB ready (external, shared)")
 
 
 # ============ حسابات المستخدمين (كل مستخدم رصيد ومخاطرة وصفقات خاصة فيه) ============
@@ -117,119 +113,91 @@ user_cache = {}
 user_cache_lock = asyncio.Lock()
 
 def _row_to_account(row) -> dict:
-    balance, initial_balance, risk_percent, active_trade_raw, stats_raw, equity_raw = row
-    active_trade = json.loads(active_trade_raw) if active_trade_raw else None
-    stats = json.loads(stats_raw) if stats_raw else dict(DEFAULT_STATS)
-    equity_history = json.loads(equity_raw) if equity_raw else []
+    active_trade = json.loads(row["active_trade"]) if row["active_trade"] else None
+    stats = json.loads(row["stats"]) if row["stats"] else dict(DEFAULT_STATS)
+    equity_history = json.loads(row["equity_history"]) if row["equity_history"] else []
     return {
-        "balance": balance, "initial_balance": initial_balance, "risk_percent": risk_percent,
+        "balance": row["balance"], "initial_balance": row["initial_balance"], "risk_percent": row["risk_percent"],
         "active_trade": active_trade, "stats": stats, "equity_history": equity_history,
     }
 
-def _load_user_account_sync(user_id: str):
-    conn = sqlite3.connect(SECURITY_DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT balance, initial_balance, risk_percent, active_trade, stats, equity_history FROM user_accounts WHERE user_id = ?",
-        (str(user_id),)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return row
+async def _load_user_account(user_id: str):
+    async with pg_pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT balance, initial_balance, risk_percent, active_trade, stats, equity_history FROM user_accounts WHERE user_id = $1",
+            str(user_id)
+        )
 
-def _save_user_account_sync(user_id: str, account: dict):
-    conn = sqlite3.connect(SECURITY_DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO user_accounts (user_id, balance, initial_balance, risk_percent, active_trade, stats, equity_history, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(user_id) DO UPDATE SET
-            balance=excluded.balance, initial_balance=excluded.initial_balance,
-            risk_percent=excluded.risk_percent, active_trade=excluded.active_trade,
-            stats=excluded.stats, equity_history=excluded.equity_history, updated_at=CURRENT_TIMESTAMP
-    """, (
-        str(user_id), account["balance"], account["initial_balance"], account["risk_percent"],
-        json.dumps(account["active_trade"]) if account["active_trade"] else None,
-        json.dumps(account["stats"]),
-        json.dumps(account["equity_history"][-200:]),  # حد أقصى للسجل المحفوظ
-    ))
-    conn.commit()
-    conn.close()
+async def _save_user_account_db(user_id: str, account: dict):
+    async with pg_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_accounts (user_id, balance, initial_balance, risk_percent, active_trade, stats, equity_history, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                balance=excluded.balance, initial_balance=excluded.initial_balance,
+                risk_percent=excluded.risk_percent, active_trade=excluded.active_trade,
+                stats=excluded.stats, equity_history=excluded.equity_history, updated_at=NOW()
+        """,
+            str(user_id), account["balance"], account["initial_balance"], account["risk_percent"],
+            json.dumps(account["active_trade"]) if account["active_trade"] else None,
+            json.dumps(account["stats"]),
+            json.dumps(account["equity_history"][-200:]),
+        )
 
 async def get_user_account(user_id: str) -> dict:
     user_id = str(user_id)
     async with user_cache_lock:
         if user_id in user_cache:
             return user_cache[user_id]
-        row = _load_user_account_sync(user_id)
+        row = await _load_user_account(user_id)
         account = _row_to_account(row) if row else _default_user_account()
         user_cache[user_id] = account
         if not row:
-            _save_user_account_sync(user_id, account)
+            await _save_user_account_db(user_id, account)
         return account
 
 async def save_user_account(user_id: str, account: dict):
     user_id = str(user_id)
     async with user_cache_lock:
         user_cache[user_id] = account
-        _save_user_account_sync(user_id, account)
+    await _save_user_account_db(user_id, account)
 
 async def add_user_trade_record(user_id: str, trade: dict):
-    def _insert():
-        conn = sqlite3.connect(SECURITY_DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
+    async with pg_pool.acquire() as conn:
+        await conn.execute("""
             INSERT INTO user_trades (user_id, direction, entry_price, exit_price, pnl_pips, pnl_usd,
                 result, confidence, open_time, close_time, sl_pips, tp1_pips, tp2_pips, rr, duration, lot_size)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        """,
             str(user_id), trade["direction"], trade["entry_price"], trade["exit_price"],
             trade["pnl_pips"], trade["pnl_usd"], trade["result"], trade.get("confidence", 0),
             trade.get("open_time", time.time()), trade.get("close_time", now_str()),
             trade.get("sl_pips", 0), trade.get("tp1_pips", 0), trade.get("tp2_pips", 0),
             trade.get("rr", ""), trade.get("duration", ""), trade.get("lot_size", 0.01),
-        ))
-        conn.commit()
-        conn.close()
-    _insert()
+        )
 
 async def get_user_trades(user_id: str, limit: int = 5) -> list:
-    def _query():
-        conn = sqlite3.connect(SECURITY_DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
+    async with pg_pool.acquire() as conn:
+        rows = await conn.fetch("""
             SELECT direction, entry_price, exit_price, pnl_pips, pnl_usd, result, close_time, confidence
-            FROM user_trades WHERE user_id = ? ORDER BY id DESC LIMIT ?
-        """, (str(user_id), limit))
-        rows = cursor.fetchall()
-        conn.close()
-        cols = ["direction", "entry_price", "exit_price", "pnl_pips", "pnl_usd", "result", "close_time", "confidence"]
-        return [dict(zip(cols, row)) for row in rows]
-    return _query()
+            FROM user_trades WHERE user_id = $1 ORDER BY id DESC LIMIT $2
+        """, str(user_id), limit)
+    return [dict(row) for row in rows]
 
 async def get_all_authorized_user_ids() -> list:
     """كل معرفات المستخدمين المصرح لهم حاليا (بدون منتهي الصلاحية) + المشرفين"""
-    def _query():
-        conn = sqlite3.connect(SECURITY_DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, expires_at FROM authorized_users")
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
     try:
-        rows = _query()
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id, expires_at FROM authorized_users")
     except Exception as e:
         print(f"❌ خطأ قراءة authorized_users (سيتم استخدام المشرفين فقط): {e}")
         rows = []
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     ids = set(ADMIN_USER_IDS)
-    for uid, expires_at in rows:
-        if expires_at:
-            try:
-                if datetime.fromisoformat(expires_at) <= now:
-                    continue
-            except ValueError:
-                pass
+    for row in rows:
+        uid, expires_at = row["user_id"], row["expires_at"]
+        if expires_at and expires_at <= now:
+            continue
         ids.add(str(uid))
     return list(ids)
 
@@ -238,24 +206,17 @@ def is_admin(user_id: str) -> bool:
     return str(user_id) in ADMIN_USER_IDS
 
 
-def is_authorized(user_id: str) -> bool:
+async def is_authorized(user_id: str) -> bool:
     if is_admin(user_id):
         return True
     try:
-        conn = sqlite3.connect(SECURITY_DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT expires_at FROM authorized_users WHERE user_id = ?", (str(user_id),))
-        result = cursor.fetchone()
-        conn.close()
-        if result is None:
+        async with pg_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT expires_at FROM authorized_users WHERE user_id = $1", str(user_id))
+        if row is None:
             return False
-        expires_at = result[0]
-        if expires_at:
-            try:
-                if _dt_sec.fromisoformat(expires_at) <= _dt_sec.now(_tz_sec.utc).replace(tzinfo=None):
-                    return False
-            except ValueError:
-                pass
+        expires_at = row["expires_at"]
+        if expires_at and expires_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+            return False
         return True
     except Exception as e:
         print(f"Auth check error: {e}")
@@ -304,7 +265,7 @@ def require_auth(func):
             tg_user = update.effective_user
         user_id = str(tg_user.id)
 
-        if not is_authorized(user_id):
+        if not await is_authorized(user_id):
             msg = (
                 "⛔ غير مصرح لك!\n\n"
                 "🔒 ليس لديك صلاحية.\n"
@@ -2259,7 +2220,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in _awaiting_balance_input:
         return
-    if not is_authorized(user_id):
+    if not await is_authorized(user_id):
         return
     text = (update.effective_message.text or "").strip().replace(",", "")
     try:
@@ -2903,7 +2864,7 @@ async def main():
     # تهيئة قاعدة البيانات
     try:
         init_db()
-        init_security_db()
+        await init_security_db()
         await load_state()
     except Exception as e:
         print(f"❌ فشل تهيئة قاعدة البيانات - البوت لن يعمل بشكل صحيح: {e}")
@@ -2967,4 +2928,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
