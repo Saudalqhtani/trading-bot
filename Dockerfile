@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD bash -c "python main.py & python security_bot.py & wait"
+CMD ["python", "main.py"]
