@@ -17,7 +17,7 @@ import aiohttp
 import time
 import math
 import re
-import sqlite3
+import asyncpg
 import xml.etree.ElementTree as ET
 import traceback
 from dataclasses import dataclass
@@ -30,7 +30,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 import time as _time_sec
 from functools import wraps
 from datetime import datetime as _dt_sec, timezone as _tz_sec
-import asyncpg
 
 DATABASE_URL = os.environ.get("DATABASE_URL")  # اتصال Postgres خارجي (Neon/Supabase/أي مزود) - مشترك بين البوتين
 # يدعم عدة مشرفين: ADMIN_USER_IDS="111,222,333" (أو ADMIN_USER_ID القديم لمشرف واحد)
@@ -290,7 +289,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY")
 
-DB_PATH = os.environ.get("DB_PATH", "/app/data/gold_bot.db")
 WEEKEND_CLOSE_HOUR = int(os.environ.get("WEEKEND_CLOSE_HOUR", 21))
 WEEKEND_OPEN_HOUR = int(os.environ.get("WEEKEND_OPEN_HOUR", 22))
 
@@ -335,67 +333,36 @@ SESSIONS_CONFIG = {
 
 # ============ قاعدة البيانات ============
 
-def init_db():
-    """تهيئة قاعدة بيانات SQLite"""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            direction TEXT NOT NULL,
-            entry_price REAL NOT NULL,
-            exit_price REAL,
-            sl_pips REAL,
-            tp1_pips REAL,
-            tp2_pips REAL,
-            pnl_pips REAL,
-            pnl_usd REAL,
-            result TEXT,
-            confidence INTEGER,
-            open_time TEXT,
-            close_time TEXT,
-            rr TEXT,
-            duration TEXT,
-            lot_size REAL DEFAULT 0.01,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS signals_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            signal_id TEXT UNIQUE,
-            decision TEXT,
-            confidence INTEGER,
-            entry_price REAL,
-            sl_pips REAL,
-            tp1_pips REAL,
-            tp2_pips REAL,
-            rr TEXT,
-            status TEXT DEFAULT 'pending',
-            analysis_text TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
-    print("✅ قاعدة البيانات جاهزة")
+async def init_db():
+    """تهيئة جداول حالة البوت الداخلية (state + signals_history) على Postgres المشترك"""
+    async with pg_pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS signals_history (
+                id SERIAL PRIMARY KEY,
+                signal_id TEXT UNIQUE,
+                decision TEXT,
+                confidence INTEGER,
+                entry_price REAL,
+                sl_pips REAL,
+                tp1_pips REAL,
+                tp2_pips REAL,
+                rr TEXT,
+                status TEXT DEFAULT 'pending',
+                analysis_text TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+    print("✅ قاعدة البيانات جاهزة (Postgres)")
 
 async def save_state():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
         state_data = {
             "stats": json.dumps(db["stats"]),
             "current_balance": str(db["current_balance"]),
@@ -410,20 +377,21 @@ async def save_state():
             "gemini_paused_until": str(db["gemini_paused_until"]),
             "gemini_pause_notified": str(int(db["gemini_pause_notified"])),
         }
-        for key, value in state_data.items():
-            cursor.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, value))
-        conn.commit()
-        conn.close()
+        async with pg_pool.acquire() as conn:
+            for key, value in state_data.items():
+                await conn.execute(
+                    "INSERT INTO state (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    key, value
+                )
     except Exception as e:
         print(f"⚠️ خطأ حفظ الحالة: {e}")
 
 async def load_state():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT key, value FROM state")
-        rows = cursor.fetchall()
-        for key, value in rows:
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT key, value FROM state")
+        for row in rows:
+            key, value = row["key"], row["value"]
             if key == "stats": db["stats"] = json.loads(value)
             elif key == "current_balance": db["current_balance"] = float(value)
             elif key == "initial_balance": db["initial_balance"] = float(value)
@@ -438,63 +406,27 @@ async def load_state():
             elif key == "twelvedata_pause_notified": db["twelvedata_pause_notified"] = bool(int(value))
             elif key == "gemini_paused_until": db["gemini_paused_until"] = float(value)
             elif key == "gemini_pause_notified": db["gemini_pause_notified"] = bool(int(value))
-        cursor.execute("SELECT * FROM trades ORDER BY created_at DESC")
-        trades = cursor.fetchall()
-        columns = [c[0] for c in cursor.description]
-        db["trades"] = [dict(zip(columns, t)) for t in trades]
-        conn.close()
         print("✅ تم استعادة الحالة من قاعدة البيانات")
     except Exception as e:
         print(f"⚠️ خطأ استعادة الحالة: {e}")
 
-async def save_trade(trade_data: dict):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO trades (direction, entry_price, exit_price, sl_pips, tp1_pips, tp2_pips, 
-             pnl_pips, pnl_usd, result, confidence, open_time, close_time, rr, duration, lot_size)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            trade_data["direction"], trade_data["entry_price"], trade_data.get("exit_price", 0),
-            trade_data.get("sl_pips", 0), trade_data.get("tp1_pips", 0), trade_data.get("tp2_pips", 0),
-            trade_data.get("pnl_pips", 0), trade_data.get("pnl_usd", 0), trade_data.get("result", ""),
-            trade_data.get("confidence", 0), trade_data.get("open_time", ""), trade_data.get("close_time", ""),
-            trade_data.get("rr", ""), trade_data.get("duration", ""), trade_data.get("lot_size", 0.01)
-        ))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ خطأ حفظ الصفقة: {e}")
-
 async def save_signal(signal_id: str, signal_data: dict, analysis_text: str):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO signals_history 
-            (signal_id, decision, confidence, entry_price, sl_pips, tp1_pips, tp2_pips, rr, status, analysis_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            signal_id, signal_data.get("decision", "HOLD"), signal_data.get("confidence", 0),
-            signal_data.get("entry_price", 0), signal_data.get("sl_pips", 0),
-            signal_data.get("tp1_pips", 0), signal_data.get("tp2_pips", 0),
-            signal_data.get("rr", ""), "pending", analysis_text
-        ))
-        conn.commit()
-        conn.close()
+        async with pg_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO signals_history
+                (signal_id, decision, confidence, entry_price, sl_pips, tp1_pips, tp2_pips, rr, status, analysis_text)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (signal_id) DO UPDATE SET
+                    decision=excluded.decision, confidence=excluded.confidence, analysis_text=excluded.analysis_text
+            ''',
+                signal_id, signal_data.get("decision", "HOLD"), signal_data.get("confidence", 0),
+                signal_data.get("entry_price", 0), signal_data.get("sl_pips", 0),
+                signal_data.get("tp1_pips", 0), signal_data.get("tp2_pips", 0),
+                signal_data.get("rr", ""), "pending", analysis_text
+            )
     except Exception as e:
         print(f"⚠️ خطأ حفظ الإشارة: {e}")
-
-async def update_signal_status(signal_id: str, status: str):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE signals_history SET status = ? WHERE signal_id = ?", (status, signal_id))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ خطأ تحديث حالة الإشارة: {e}")
 
 
 
@@ -2862,8 +2794,8 @@ async def save_state_coro():
 async def main():
     # تهيئة قاعدة البيانات
     try:
-        init_db()
         await init_security_db()
+        await init_db()
         await load_state()
     except Exception as e:
         print(f"❌ فشل تهيئة قاعدة البيانات - البوت لن يعمل بشكل صحيح: {e}")
