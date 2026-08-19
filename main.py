@@ -1643,51 +1643,28 @@ def _merge_signals(signal_a, label_a: str, signal_b, label_b: str):
 
 
 async def consensus_analysis(tf_data: dict, dxy_price: float):
-    print("🔄 [consensus] بدء تحليل الإجماع...")
-
-    if await _gemini_paused():
-        print("⏸️ [consensus] Gemini متوقف مؤقتاً (نفاذ الرصيد) - التحول لإجماع Groq+Cerebras")
-        groq_signal = await analyze_groq_structured(tf_data, dxy_price)
-        cerebras_signal = await analyze_cerebras_structured(tf_data, dxy_price)
-        if groq_signal is None and cerebras_signal is None:
-            print("⚠️ [consensus] Groq وCerebras فشلا معاً")
-            return None, "BOTH_FAIL", 0
-        if groq_signal is None:
-            print(f"🧠 [consensus] Cerebras فقط: {cerebras_signal.decision} (ثقة {cerebras_signal.confidence}%)")
-            reduced = max(50, cerebras_signal.confidence - 15)
-            cerebras_signal.confidence = reduced
-            return cerebras_signal, "CEREBRAS_ONLY", reduced
-        if cerebras_signal is None:
-            print(f"🦙 [consensus] Groq فقط: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
-            reduced = max(50, groq_signal.confidence - 15)
-            groq_signal.confidence = reduced
-            return groq_signal, "GROQ_ONLY", reduced
-        print(f"🦙 [consensus] Groq: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
-        print(f"🧠 [consensus] Cerebras: {cerebras_signal.decision} (ثقة {cerebras_signal.confidence}%)")
-        return _merge_signals(groq_signal, "Groq", cerebras_signal, "Cerebras")
-
-    gemini_signal = await analyze_gemini_structured(tf_data, dxy_price)
-    if gemini_signal is None:
-        print("⚠️ [consensus] Gemini فشل - تجربة Groq فقط كاحتياطي")
-        groq_signal = await analyze_groq_structured(tf_data, dxy_price)
-        if groq_signal is None:
-            print("⚠️ [consensus] Groq فشل ايضا")
-            return None, "BOTH_FAIL", 0
-        reduced_confidence = max(50, groq_signal.confidence - 15)
-        print(f"🦙 [consensus] Groq فقط (احتياطي): {groq_signal.decision} | ثقة مخفضة: {reduced_confidence}%")
-        groq_signal.confidence = reduced_confidence
-        return groq_signal, "GROQ_ONLY", reduced_confidence
-
-    print(f"🤖 [consensus] Gemini: {gemini_signal.decision} (ثقة {gemini_signal.confidence}%)")
+    print("🔄 [consensus] بدء تحليل الإجماع (Groq + Cerebras)...")
+    async with db_lock:
+        db["gemini_calls_today"] += 1  # عداد عام لمحاولات التحليل اليومية
 
     groq_signal = await analyze_groq_structured(tf_data, dxy_price)
+    cerebras_signal = await analyze_cerebras_structured(tf_data, dxy_price)
+    if groq_signal is None and cerebras_signal is None:
+        print("⚠️ [consensus] Groq وCerebras فشلا معاً")
+        return None, "BOTH_FAIL", 0
     if groq_signal is None:
-        print("⚠️ [consensus] Groq فشل، استخدام Gemini فقط")
-        return gemini_signal, "GEMINI_ONLY", gemini_signal.confidence
-
+        print(f"🧠 [consensus] Cerebras فقط: {cerebras_signal.decision} (ثقة {cerebras_signal.confidence}%)")
+        reduced = max(50, cerebras_signal.confidence - 15)
+        cerebras_signal.confidence = reduced
+        return cerebras_signal, "CEREBRAS_ONLY", reduced
+    if cerebras_signal is None:
+        print(f"🦙 [consensus] Groq فقط: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
+        reduced = max(50, groq_signal.confidence - 15)
+        groq_signal.confidence = reduced
+        return groq_signal, "GROQ_ONLY", reduced
     print(f"🦙 [consensus] Groq: {groq_signal.decision} (ثقة {groq_signal.confidence}%)")
-
-    return _merge_signals(gemini_signal, "Gemini", groq_signal, "Groq")
+    print(f"🧠 [consensus] Cerebras: {cerebras_signal.decision} (ثقة {cerebras_signal.confidence}%)")
+    return _merge_signals(groq_signal, "Groq", cerebras_signal, "Cerebras")
 
 
 
